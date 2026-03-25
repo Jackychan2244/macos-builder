@@ -697,6 +697,11 @@ jobs:
         cp libcxx-build/* base-app/Contents/Frameworks/
         cp ssl/lib/* base-app/Contents/Frameworks/
         cp ./source/osx-angle-ci/artifacts/* base-app/Contents/Frameworks/
+
+        curl -sL -o mvk-angle.zip https://github.com/minecraft-linux/angle/releases/download/mvk-angle-exp1/mvk-angle.zip
+        MVK_ANGLE="$PWD/mvk-angle.zip"
+        cd base-app/Contents/Frameworks
+        unzip "$MVK_ANGLE"
     - name: add m1 build
       if: inputs.build-m1
       run: |
