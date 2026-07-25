@@ -372,18 +372,7 @@ jobs:
         mkdir -p source/osx-angle-ci/artifacts
         OUT="$(pwd)/source/osx-angle-ci/artifacts"
         cd angle-src
-        cat > "$OUT/args.gn" << 'GNEOF'
-target_cpu="x64"
-is_debug=false
-mac_sdk_min="10.13"
-mac_min_system_version="10.13"
-mac_deployment_target="10.13"
-angle_enable_metal=true
-angle_enable_swiftshader=false
-angle_enable_vulkan=false
-angle_enable_gl=false
-angle_enable_null=false
-GNEOF
+        printf 'target_cpu="x64"\nis_debug=false\nmac_sdk_min="10.13"\nmac_min_system_version="10.13"\nmac_deployment_target="10.13"\nangle_enable_metal=true\nangle_enable_swiftshader=false\nangle_enable_vulkan=false\nangle_enable_gl=false\nangle_enable_null=false\n' > "$OUT/args.gn"
         gn gen "$OUT"
         autoninja -C "$OUT" libEGL libGLESv2
 
