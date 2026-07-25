@@ -1,0 +1,252 @@
+name: Build Minecraft Launcher (GLES 3.1 / Intel x86_64)
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: 'Create a GitHub release'
+        type: boolean
+        default: false
+
+jobs:
+  # ── 1. Build ANGLE x86_64 with Metal backend (GLES 3.1) ────────────────────
+  build-angle:
+    name: Build ANGLE x86_64 (Metal / GLES 3.1)
+    runs-on: macos-15-intel
+    env:
+      MACOSX_DEPLOYMENT_TARGET: "10.13"
+    steps:
+      - name: Cache ANGLE
+        id: cache-angle
+        uses: actions/cache@v4
+        with:
+          path: angle-out
+          key: angle-gles31-x64-metal-v2
+
+      - name: Install depot_tools
+        if: steps.cache-angle.outputs.cache-hit != 'true'
+        run: |
+          git clone --depth 1 https://chromium.googlesource.com/chromium/tools/depot_tools.git
+          echo "$GITHUB_WORKSPACE/depot_tools" >> $GITHUB_PATH
+
+      - name: Fetch ANGLE (minecraft-linux fork, metal-freeze branch)
+        if: steps.cache-angle.outputs.cache-hit != 'true'
+        run: |
+          git clone https://github.com/minecraft-linux/angle.git -b metal-freeze angle-src
+          cd angle-src
+          python3 scripts/bootstrap.py
+          gclient sync --no-history -j8
+
+      - name: Build ANGLE x86_64
+        if: steps.cache-angle.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p angle-out
+          OUT="$GITHUB_WORKSPACE/angle-out"
+          cd angle-src
+          python3 -c "
+          args = [
+            'target_cpu=\"x64\"',
+            'is_debug=false',
+            'mac_sdk_min=\"10.13\"',
+            'mac_min_system_version=\"10.13\"',
+            'mac_deployment_target=\"10.13\"',
+            'angle_enable_metal=true',
+            'angle_enable_swiftshader=false',
+            'angle_enable_vulkan=false',
+            'angle_enable_gl=false',
+            'angle_enable_null=false',
+          ]
+          open('$OUT/args.gn', 'w').write('\n'.join(args))
+          "
+          gn gen "$OUT"
+          autoninja -C "$OUT" libEGL libGLESv2
+
+      - name: Verify GLES 3.1 symbols
+        run: |
+          ls -lh angle-out/libEGL.dylib angle-out/libGLESv2.dylib
+          nm angle-out/libGLESv2.dylib | grep -q "glDispatchCompute" && echo "GLES 3.1 confirmed" || (echo "GLES 3.1 NOT confirmed"; exit 1)
+
+      - name: Upload ANGLE artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: angle-x86_64-gles31
+          path: |
+            angle-out/libEGL.dylib
+            angle-out/libGLESv2.dylib
+
+  # ── 2. Build OpenSSL (needed by mcpelauncher) ───────────────────────────────
+  build-openssl:
+    name: Build OpenSSL x86_64
+    runs-on: macos-15-intel
+    steps:
+      - name: Cache OpenSSL
+        id: cache-ssl
+        uses: actions/cache@v4
+        with:
+          path: ssl-out
+          key: openssl-x64-macos-v1
+
+      - name: Build OpenSSL
+        if: steps.cache-ssl.outputs.cache-hit != 'true'
+        run: |
+          git clone https://github.com/openssl/openssl.git -b openssl-3.2
+          mkdir -p ssl-out
+          cd openssl
+          ./config --prefix="$GITHUB_WORKSPACE/ssl-out"
+          make -j8
+          make install_sw -j8
+
+      - name: Upload OpenSSL
+        uses: actions/upload-artifact@v4
+        with:
+          name: openssl-x86_64
+          path: ssl-out/
+
+  # ── 3. Build mcpelauncher + UI ──────────────────────────────────────────────
+  build-launcher:
+    name: Build mcpelauncher (Intel x86_64)
+    runs-on: macos-15-intel
+    needs: [build-angle, build-openssl]
+    env:
+      MACOSX_DEPLOYMENT_TARGET: "10.13"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Install Python deps
+        run: pip3 install --break-system-packages jinja2
+
+      - name: Install brew deps
+        run: |
+          brew install cmake ninja automake autoconf libtool p7zip
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: 1
+
+      - name: Download ANGLE
+        uses: actions/download-artifact@v4
+        with:
+          name: angle-x86_64-gles31
+          path: angle-artifacts
+
+      - name: Download OpenSSL
+        uses: actions/download-artifact@v4
+        with:
+          name: openssl-x86_64
+          path: ssl-artifacts
+
+      - name: Install Qt 5.15
+        run: |
+          # Download Qt 5.15.0 prebuilt for macOS x86_64
+          QT_BASE_URL="http://download.qt.io/online/qtsdkrepository/mac_x64/desktop/qt5_5150/"
+          QT_VERSION="5.15.0-0-202005140805"
+          QT_PKG_PREFIX="qt.qt5.5150."
+          QT_PKG_SUFFIX="clang_64"
+          QT_PREBUILT="-MacOS-MacOS_10_13-Clang-MacOS-MacOS_10_13-X86_64"
+          bash download_qt.sh
+        env:
+          QT_BASE_URL: "http://download.qt.io/online/qtsdkrepository/mac_x64/desktop/qt5_5150/"
+          QT_VERSION_SHORT: "5.15.0"
+          QT_VERSION: "5.15.0-0-202005140805"
+          QT_PACKAGE_PREFIX: "qt.qt5.5150."
+          QT_PACKAGE_SUFFIX: "clang_64"
+          QT_PREBUILT_SUFFIX: "-MacOS-MacOS_10_13-Clang-MacOS-MacOS_10_13-X86_64"
+
+      - name: Clone sources
+        run: |
+          MCPE_REF=$(cat mcpelauncher.commit)
+          MSA_REF=$(cat msa.commit)
+          MCPEUI_REF=$(cat mcpelauncher-ui.commit)
+
+          git clone https://github.com/minecraft-linux/mcpelauncher-manifest.git source/mcpelauncher
+          git -C source/mcpelauncher checkout "$MCPE_REF"
+          git -C source/mcpelauncher submodule update --init --recursive
+
+          git clone https://github.com/minecraft-linux/msa-manifest.git source/msa
+          git -C source/msa checkout "$MSA_REF"
+          git -C source/msa submodule update --init --recursive
+
+          git clone https://github.com/minecraft-linux/mcpelauncher-ui-manifest.git source/mcpelauncher-ui
+          git -C source/mcpelauncher-ui checkout "$MCPEUI_REF"
+          git -C source/mcpelauncher-ui submodule update --init --recursive
+
+          # Clone versionsdb
+          VDBREF=$(cat versionsdb.txt)
+          git clone https://github.com/minecraft-linux/mcpelauncher-versiondb.git source/versionsdb
+          git -C source/versionsdb checkout "$VDBREF"
+
+      - name: Build libzip
+        run: |
+          git clone https://github.com/nih-at/libzip libzip
+          git -C libzip checkout v1.9.2
+          cmake libzip -B libzip-build \
+            -DCMAKE_POLICY_VERSION_MINIMUM=4.0 \
+            -DBUILD_TOOLS=OFF -DBUILD_REGRESS=OFF -DBUILD_EXAMPLES=OFF -DBUILD_DOC=OFF \
+            -DENABLE_BZIP2=OFF -DENABLE_LZMA=OFF -DENABLE_ZSTD=OFF \
+            -DENABLE_COMMONCRYPTO=OFF -DENABLE_GNUTLS=OFF -DENABLE_MBEDTLS=OFF \
+            -DENABLE_OPENSSL=OFF -DENABLE_WINDOWS_CRYPTO=OFF -DENABLE_FDOPEN=OFF
+          cmake --build libzip-build --parallel
+          sudo cmake --build libzip-build --target install --parallel
+
+      - name: Prepare base app skeleton
+        run: |
+          mkdir -p base-app/Contents/Frameworks
+          cp angle-artifacts/libEGL.dylib base-app/Contents/Frameworks/
+          cp angle-artifacts/libGLESv2.dylib base-app/Contents/Frameworks/
+          cp ssl-artifacts/lib/libssl.dylib base-app/Contents/Frameworks/ 2>/dev/null || true
+          cp ssl-artifacts/lib/libcrypto.dylib base-app/Contents/Frameworks/ 2>/dev/null || true
+
+      - name: Build launcher (mcpelauncher + msa + ui)
+        run: |
+          SSL_INC="-I$GITHUB_WORKSPACE/ssl-artifacts/include"
+          SSL_LIB="-L$GITHUB_WORKSPACE/ssl-artifacts/lib"
+          SSL_ROOT="$GITHUB_WORKSPACE/ssl-artifacts"
+
+          python3 __main__.py \
+            --qt-path qt/*/${QT_VERSION_SHORT:?}* \
+            --app-root base-app \
+            --build-id "$GITHUB_RUN_NUMBER" \
+            --prettyversion "v1.x-gles31-$GITHUB_RUN_NUMBER" \
+            --version "1.0.$GITHUB_RUN_NUMBER" \
+            --skip-sync-sources
+        env:
+          QT_VERSION_SHORT: "5.15.0"
+          OPENSSL_ROOT_DIR: ${{ github.workspace }}/ssl-artifacts
+          CMAKE_CXX_FLAGS: "-DNDEBUG -D_LIBCPP_DISABLE_AVAILABILITY=1"
+
+      - name: Build DMG
+        run: python3 build_dmg.py
+
+      - name: Rename DMG
+        run: |
+          mv "output/Minecraft Bedrock Launcher.dmg" \
+             "Minecraft_Bedrock_Launcher_GLES31_Intel_macOS_10.13_build${GITHUB_RUN_NUMBER}.dmg"
+
+      - name: Upload DMG
+        uses: actions/upload-artifact@v4
+        with:
+          name: launcher-dmg-intel-gles31
+          path: "*.dmg"
+
+      - name: Create release
+        if: inputs.publish == true
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: "gles31-${{ github.run_number }}"
+          name: "Minecraft Launcher GLES 3.1 (Intel) — build ${{ github.run_number }}"
+          body: |
+            Intel Mac (x86_64) build with GLES 3.1 support via Metal-backed ANGLE.
+            Supports Minecraft Bedrock 1.21.60+ (including 1.26.x).
+
+            Load your APK via: Launcher → Settings → Import APK
+          files: "*.dmg"
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
