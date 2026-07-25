@@ -202,29 +202,123 @@ jobs:
           cp ssl-artifacts/lib/libssl.dylib base-app/Contents/Frameworks/ 2>/dev/null || true
           cp ssl-artifacts/lib/libcrypto.dylib base-app/Contents/Frameworks/ 2>/dev/null || true
 
-      - name: Build launcher (mcpelauncher + msa + ui)
+      - name: Find Qt path
+        id: qt
         run: |
-          SSL_INC="-I$GITHUB_WORKSPACE/ssl-artifacts/include"
-          SSL_LIB="-L$GITHUB_WORKSPACE/ssl-artifacts/lib"
-          SSL_ROOT="$GITHUB_WORKSPACE/ssl-artifacts"
+          QT_PATH=$(ls -d qt/*/5.15.0/clang_64 2>/dev/null | head -1)
+          echo "path=$QT_PATH" >> $GITHUB_OUTPUT
+          echo "Qt path: $QT_PATH"
 
-          python3 __main__.py \
-            --qt-path qt/*/${QT_VERSION_SHORT:?}* \
-            --app-root base-app \
-            --build-id "$GITHUB_RUN_NUMBER" \
-            --prettyversion "v1.x-gles31-$GITHUB_RUN_NUMBER" \
-            --version "1.0.$GITHUB_RUN_NUMBER" \
-            --skip-sync-sources
-        env:
-          QT_VERSION_SHORT: "5.15.0"
-          OPENSSL_ROOT_DIR: ${{ github.workspace }}/ssl-artifacts
-          CMAKE_CXX_FLAGS: "-DNDEBUG -D_LIBCPP_DISABLE_AVAILABILITY=1"
+      - name: Build mcpelauncher (cmake direct)
+        run: |
+          SSL="$GITHUB_WORKSPACE/ssl-artifacts"
+          INSTALL="$GITHUB_WORKSPACE/source/install"
+          QT="${{ steps.qt.outputs.path }}"
+          mkdir -p "$INSTALL" source/build/mcpelauncher
+
+          cmake source/mcpelauncher \
+            -B source/build/mcpelauncher \
+            -DCMAKE_INSTALL_PREFIX="$INSTALL" \
+            -DCMAKE_PREFIX_PATH="$QT" \
+            -DCMAKE_INSTALL_RPATH_USE_LINK_PATH=ON \
+            -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
+            -DMSA_DAEMON_PATH=. \
+            -DENABLE_DEV_PATHS=OFF \
+            -DBUILD_FAKE_JNI_TESTS=OFF \
+            -DBUILD_FAKE_JNI_EXAMPLES=OFF \
+            -DXAL_WEBVIEW_QT_PATH=. \
+            -DJNI_USE_JNIVM=ON \
+            -DUSE_OWN_CURL=OFF \
+            -DOPENSSL_ROOT_DIR="$SSL" \
+            -DOPENSSL_CRYPTO_LIBRARY="$SSL/lib/libcrypto.dylib" \
+            -DCMAKE_CXX_FLAGS="-DNDEBUG -D_LIBCPP_DISABLE_AVAILABILITY=1 -I$SSL/include -L$SSL/lib"
+          cmake --build source/build/mcpelauncher --parallel --target install
+
+      - name: Build msa
+        run: |
+          SSL="$GITHUB_WORKSPACE/ssl-artifacts"
+          INSTALL="$GITHUB_WORKSPACE/source/install"
+          QT="${{ steps.qt.outputs.path }}"
+          mkdir -p source/build/msa
+
+          cmake source/msa \
+            -B source/build/msa \
+            -DCMAKE_INSTALL_PREFIX="$INSTALL" \
+            -DCMAKE_PREFIX_PATH="$QT" \
+            -DCMAKE_INSTALL_RPATH_USE_LINK_PATH=ON \
+            -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
+            -DENABLE_MSA_QT_UI=ON \
+            -DMSA_UI_PATH_DEV=OFF \
+            -DCMAKE_CXX_FLAGS="-DNDEBUG -D_LIBCPP_DISABLE_AVAILABILITY=1"
+          cmake --build source/build/msa --parallel --target install
+
+      - name: Build mcpelauncher-ui
+        run: |
+          SSL="$GITHUB_WORKSPACE/ssl-artifacts"
+          INSTALL="$GITHUB_WORKSPACE/source/install"
+          QT="${{ steps.qt.outputs.path }}"
+          VDBREF=$(cat versionsdb.txt)
+          mkdir -p source/build/mcpelauncher-ui
+
+          cmake source/mcpelauncher-ui \
+            -B source/build/mcpelauncher-ui \
+            -DCMAKE_INSTALL_PREFIX="$INSTALL" \
+            -DCMAKE_PREFIX_PATH="$QT" \
+            -DCMAKE_INSTALL_RPATH_USE_LINK_PATH=ON \
+            -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
+            -DGAME_LAUNCHER_PATH=. \
+            -DLAUNCHER_ENABLE_GOOGLE_PLAY_LICENCE_CHECK=ON \
+            -DLAUNCHER_DISABLE_DEV_MODE=ON \
+            -DLAUNCHER_VERSION_NAME="v1.x-gles31-$GITHUB_RUN_NUMBER" \
+            -DLAUNCHER_VERSION_CODE="$GITHUB_RUN_NUMBER" \
+            -DLAUNCHER_VERSIONDB_PATH="$GITHUB_WORKSPACE/source/versionsdb" \
+            -DLAUNCHER_VERSIONDB_URL="https://raw.githubusercontent.com/minecraft-linux/mcpelauncher-versiondb/$VDBREF" \
+            -DOPENSSL_ROOT_DIR="$SSL" \
+            -DOPENSSL_CRYPTO_LIBRARY="$SSL/lib/libcrypto.dylib" \
+            -DCMAKE_CXX_FLAGS="-DNDEBUG -D_LIBCPP_DISABLE_AVAILABILITY=1 -I$SSL/include -L$SSL/lib"
+          cmake --build source/build/mcpelauncher-ui --parallel --target install
+
+      - name: Assemble .app bundle
+        run: |
+          INSTALL="$GITHUB_WORKSPACE/source/install"
+          QT="${{ steps.qt.outputs.path }}"
+          APP="output/Minecraft Bedrock Launcher.app"
+          mkdir -p "$APP/Contents/"{MacOS,Frameworks,Resources}
+
+          # Copy installed bins
+          cp "$INSTALL/bin/"* "$APP/Contents/MacOS/" 2>/dev/null || true
+          cp -R "$INSTALL/share/"* "$APP/Contents/Resources/" 2>/dev/null || true
+
+          # Copy ANGLE + OpenSSL into Frameworks
+          cp angle-artifacts/libEGL.dylib "$APP/Contents/Frameworks/"
+          cp angle-artifacts/libGLESv2.dylib "$APP/Contents/Frameworks/"
+          cp ssl-artifacts/lib/libssl.dylib "$APP/Contents/Frameworks/" 2>/dev/null || true
+          cp ssl-artifacts/lib/libcrypto.dylib "$APP/Contents/Frameworks/" 2>/dev/null || true
+
+          # Qt deploy
+          "$QT/bin/macdeployqt" "$APP" \
+            -qmldir=source/mcpelauncher-ui/mcpelauncher-ui-qt \
+            -executable="$APP/Contents/MacOS/mcpelauncher-ui-qt" \
+            -executable="$APP/Contents/MacOS/msa-ui-qt" || true
+
+          # Info.plist
+          cat > "$APP/Contents/Info.plist" << 'PLIST'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0"><dict>
+            <key>CFBundleIdentifier</key><string>io.mrarm.mcpelauncher.ui</string>
+            <key>CFBundleExecutable</key><string>mcpelauncher-ui-qt</string>
+            <key>CFBundleName</key><string>Minecraft Bedrock Launcher</string>
+            <key>CFBundleVersion</key><string>1.0.${{ github.run_number }}</string>
+            <key>CFBundleIconFile</key><string>minecraft</string>
+            <key>LSMinimumSystemVersion</key><string>10.15</string>
+          </dict></plist>
+          PLIST
 
       - name: Build DMG
-        run: python3 build_dmg.py
-
-      - name: Rename DMG
         run: |
+          mkdir -p output
+          python3 build_dmg.py
           mv "output/Minecraft Bedrock Launcher.dmg" \
              "Minecraft_Bedrock_Launcher_GLES31_Intel_macOS_10.15_build${GITHUB_RUN_NUMBER}.dmg"
 
