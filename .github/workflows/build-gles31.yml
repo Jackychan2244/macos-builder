@@ -16,14 +16,14 @@ jobs:
     name: Build ANGLE x86_64 (Metal / GLES 3.1)
     runs-on: macos-15-intel
     env:
-      MACOSX_DEPLOYMENT_TARGET: "10.13"
+      MACOSX_DEPLOYMENT_TARGET: "10.15"
     steps:
       - name: Cache ANGLE
         id: cache-angle
         uses: actions/cache@v4
         with:
           path: angle-out
-          key: angle-gles31-x64-metal-v2
+          key: angle-gles31-x64-metal-v3
 
       - name: Install depot_tools
         if: steps.cache-angle.outputs.cache-hit != 'true'
@@ -49,9 +49,9 @@ jobs:
           args = [
             'target_cpu=\"x64\"',
             'is_debug=false',
-            'mac_sdk_min=\"10.13\"',
-            'mac_min_system_version=\"10.13\"',
-            'mac_deployment_target=\"10.13\"',
+            'mac_sdk_min=\"10.15\"',
+            'mac_min_system_version=\"10.15\"',
+            'mac_deployment_target=\"10.15\"',
             'angle_enable_metal=true',
             'angle_enable_swiftshader=false',
             'angle_enable_vulkan=false',
@@ -110,7 +110,7 @@ jobs:
     runs-on: macos-15-intel
     needs: [build-angle, build-openssl]
     env:
-      MACOSX_DEPLOYMENT_TARGET: "10.13"
+      MACOSX_DEPLOYMENT_TARGET: "10.15"
     steps:
       - uses: actions/checkout@v4
 
@@ -226,7 +226,7 @@ jobs:
       - name: Rename DMG
         run: |
           mv "output/Minecraft Bedrock Launcher.dmg" \
-             "Minecraft_Bedrock_Launcher_GLES31_Intel_macOS_10.13_build${GITHUB_RUN_NUMBER}.dmg"
+             "Minecraft_Bedrock_Launcher_GLES31_Intel_macOS_10.15_build${GITHUB_RUN_NUMBER}.dmg"
 
       - name: Upload DMG
         uses: actions/upload-artifact@v4
