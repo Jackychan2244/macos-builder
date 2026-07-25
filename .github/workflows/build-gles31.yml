@@ -125,7 +125,7 @@ jobs:
 
       - name: Install brew deps
         run: |
-          brew install cmake ninja automake autoconf libtool p7zip
+          brew install cmake ninja automake autoconf libtool p7zip protobuf
         env:
           HOMEBREW_NO_AUTO_UPDATE: 1
 
