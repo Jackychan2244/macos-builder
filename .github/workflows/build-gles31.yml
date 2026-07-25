@@ -303,13 +303,41 @@ jobs:
           cp ssl-artifacts/lib/libssl.dylib "$APP/Contents/Frameworks/" 2>/dev/null || true
           cp ssl-artifacts/lib/libcrypto.dylib "$APP/Contents/Frameworks/" 2>/dev/null || true
 
-          # Qt deploy — macdeployqt is in bin/ relative to Qt prefix
-          QTBIN="$GITHUB_WORKSPACE/$(find qt -name macdeployqt -type f 2>/dev/null | head -1)"
-          echo "macdeployqt: $QTBIN"
-          "$QTBIN" "$APP" \
-            -qmldir=source/mcpelauncher-ui/mcpelauncher-ui-qt \
-            -executable="$APP/Contents/MacOS/mcpelauncher-ui-qt" \
-            -executable="$APP/Contents/MacOS/msa-ui-qt" || true
+          # Locate Qt prefix (where download_qt.sh installed it)
+          QTPFX="$GITHUB_WORKSPACE/$(find qt -name "Qt5Config.cmake" 2>/dev/null | head -1 | sed 's|/lib/cmake/Qt5/Qt5Config.cmake||')"
+          echo "Qt prefix: $QTPFX"
+
+          # Run macdeployqt — copies frameworks + QML + plugins
+          QTBIN="$QTPFX/bin/macdeployqt"
+          if [ -x "$QTBIN" ]; then
+            "$QTBIN" "$APP" \
+              -qmldir=source/mcpelauncher-ui/mcpelauncher-ui-qt \
+              -executable="$APP/Contents/MacOS/mcpelauncher-ui-qt" \
+              -executable="$APP/Contents/MacOS/msa-ui-qt" && echo "macdeployqt OK" || echo "macdeployqt failed, continuing"
+          else
+            echo "macdeployqt not found at $QTBIN"
+          fi
+
+          # Always manually copy the cocoa platform plugin — Qt will abort() without it
+          mkdir -p "$APP/Contents/PlugIns/platforms"
+          cp "$QTPFX/plugins/platforms/libqcocoa.dylib" "$APP/Contents/PlugIns/platforms/" 2>/dev/null || \
+            cp "$QTPFX/plugins/platforms/libqcocoa.dylib" "$APP/Contents/PlugIns/platforms/" && echo "Copied libqcocoa.dylib"
+
+          # Copy other essential plugins
+          for plugin_dir in imageformats iconengines; do
+            [ -d "$QTPFX/plugins/$plugin_dir" ] && \
+              mkdir -p "$APP/Contents/PlugIns/$plugin_dir" && \
+              cp "$QTPFX/plugins/$plugin_dir/"*.dylib "$APP/Contents/PlugIns/$plugin_dir/" 2>/dev/null || true
+          done
+
+          # qt.conf — tells Qt where plugins live relative to the executable
+          cat > "$APP/Contents/Resources/qt.conf" << 'QTCONF'
+[Paths]
+Plugins = PlugIns
+QTCONF
+
+          echo "Plugin dir contents:"
+          ls "$APP/Contents/PlugIns/platforms/" 2>/dev/null || echo "(empty)"
 
           # Info.plist
           cat > "$APP/Contents/Info.plist" << 'PLIST'
