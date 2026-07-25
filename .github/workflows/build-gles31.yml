@@ -121,7 +121,7 @@ jobs:
           java-version: 17
 
       - name: Install Python deps
-        run: pip3 install --break-system-packages jinja2
+        run: pip3 install --break-system-packages jinja2 ds_store
 
       - name: Install brew deps
         run: |
@@ -303,8 +303,10 @@ jobs:
           cp ssl-artifacts/lib/libssl.dylib "$APP/Contents/Frameworks/" 2>/dev/null || true
           cp ssl-artifacts/lib/libcrypto.dylib "$APP/Contents/Frameworks/" 2>/dev/null || true
 
-          # Qt deploy
-          "$QT/bin/macdeployqt" "$APP" \
+          # Qt deploy — macdeployqt is in bin/ relative to Qt prefix
+          QTBIN="$GITHUB_WORKSPACE/$(find qt -name macdeployqt -type f 2>/dev/null | head -1)"
+          echo "macdeployqt: $QTBIN"
+          "$QTBIN" "$APP" \
             -qmldir=source/mcpelauncher-ui/mcpelauncher-ui-qt \
             -executable="$APP/Contents/MacOS/mcpelauncher-ui-qt" \
             -executable="$APP/Contents/MacOS/msa-ui-qt" || true
