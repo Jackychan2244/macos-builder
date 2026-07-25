@@ -205,27 +205,32 @@ jobs:
       - name: Find Qt path
         id: qt
         run: |
-          QT_PATH=$(ls -d qt/*/5.15.0/clang_64 2>/dev/null | head -1)
+          # download_qt.sh extracts to qt/<version>/clang_64
+          QT_PATH=$(find qt -name "Qt5Config.cmake" 2>/dev/null | head -1 | xargs -I{} dirname {} | xargs -I{} dirname {})
+          [ -z "$QT_PATH" ] && QT_PATH=$(ls -d qt/5.15.0/clang_64 2>/dev/null || ls -d qt/*/clang_64 2>/dev/null | head -1)
           echo "path=$QT_PATH" >> $GITHUB_OUTPUT
-          echo "Qt path: $QT_PATH"
+          echo "Detected Qt path: $QT_PATH"
+          ls "$QT_PATH/lib/cmake/Qt5/" 2>/dev/null | head -3
 
       - name: Build mcpelauncher (cmake direct)
         run: |
           SSL="$GITHUB_WORKSPACE/ssl-artifacts"
           INSTALL="$GITHUB_WORKSPACE/source/install"
-          QT="${{ steps.qt.outputs.path }}"
+          QT="$GITHUB_WORKSPACE/${{ steps.qt.outputs.path }}"
           mkdir -p "$INSTALL" source/build/mcpelauncher
 
           cmake source/mcpelauncher \
             -B source/build/mcpelauncher \
             -DCMAKE_INSTALL_PREFIX="$INSTALL" \
             -DCMAKE_PREFIX_PATH="$QT" \
+            -DQt5_DIR="$QT/lib/cmake/Qt5" \
             -DCMAKE_INSTALL_RPATH_USE_LINK_PATH=ON \
             -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
             -DMSA_DAEMON_PATH=. \
             -DENABLE_DEV_PATHS=OFF \
             -DBUILD_FAKE_JNI_TESTS=OFF \
             -DBUILD_FAKE_JNI_EXAMPLES=OFF \
+            -DBUILD_WEBVIEW=OFF \
             -DXAL_WEBVIEW_QT_PATH=. \
             -DJNI_USE_JNIVM=ON \
             -DUSE_OWN_CURL=OFF \
@@ -238,13 +243,14 @@ jobs:
         run: |
           SSL="$GITHUB_WORKSPACE/ssl-artifacts"
           INSTALL="$GITHUB_WORKSPACE/source/install"
-          QT="${{ steps.qt.outputs.path }}"
+          QT="$GITHUB_WORKSPACE/${{ steps.qt.outputs.path }}"
           mkdir -p source/build/msa
 
           cmake source/msa \
             -B source/build/msa \
             -DCMAKE_INSTALL_PREFIX="$INSTALL" \
             -DCMAKE_PREFIX_PATH="$QT" \
+            -DQt5_DIR="$QT/lib/cmake/Qt5" \
             -DCMAKE_INSTALL_RPATH_USE_LINK_PATH=ON \
             -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
             -DENABLE_MSA_QT_UI=ON \
@@ -256,7 +262,7 @@ jobs:
         run: |
           SSL="$GITHUB_WORKSPACE/ssl-artifacts"
           INSTALL="$GITHUB_WORKSPACE/source/install"
-          QT="${{ steps.qt.outputs.path }}"
+          QT="$GITHUB_WORKSPACE/${{ steps.qt.outputs.path }}"
           VDBREF=$(cat versionsdb.txt)
           mkdir -p source/build/mcpelauncher-ui
 
@@ -264,6 +270,7 @@ jobs:
             -B source/build/mcpelauncher-ui \
             -DCMAKE_INSTALL_PREFIX="$INSTALL" \
             -DCMAKE_PREFIX_PATH="$QT" \
+            -DQt5_DIR="$QT/lib/cmake/Qt5" \
             -DCMAKE_INSTALL_RPATH_USE_LINK_PATH=ON \
             -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
             -DGAME_LAUNCHER_PATH=. \
