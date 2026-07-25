@@ -331,10 +331,7 @@ jobs:
           done
 
           # qt.conf — tells Qt where plugins live relative to the executable
-          cat > "$APP/Contents/Resources/qt.conf" << 'QTCONF'
-[Paths]
-Plugins = PlugIns
-QTCONF
+          printf '[Paths]\nPlugins = PlugIns\n' > "$APP/Contents/Resources/qt.conf"
 
           echo "Plugin dir contents:"
           ls "$APP/Contents/PlugIns/platforms/" 2>/dev/null || echo "(empty)"
