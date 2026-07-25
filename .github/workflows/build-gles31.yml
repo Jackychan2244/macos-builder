@@ -231,6 +231,7 @@ jobs:
             -DBUILD_FAKE_JNI_TESTS=OFF \
             -DBUILD_FAKE_JNI_EXAMPLES=OFF \
             -DBUILD_WEBVIEW=OFF \
+            -DENABLE_QT_ERROR_UI=OFF \
             -DXAL_WEBVIEW_QT_PATH=. \
             -DJNI_USE_JNIVM=ON \
             -DUSE_OWN_CURL=OFF \
