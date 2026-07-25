@@ -13,6 +13,10 @@ on:
         - build
         - draft
         - release
+      build-m1:
+        description: 'Also build M1/arm64 (slower, skip for Intel-only testing)'
+        type: boolean
+        default: false
 jobs:
   read-repo-files:
     runs-on: ubuntu-latest
@@ -32,7 +36,7 @@ jobs:
       publish: ${{ github.event_name == 'push' && github.server_url == 'https://github.com' || github.event_name == 'workflow_dispatch' && inputs.type == 'release' }}
       use-repo-files: true
       offset: 400
-      build-m1: true
+      build-m1: ${{ github.event_name != 'workflow_dispatch' || inputs.build-m1 == 'true' }}
       draft: ${{ github.event_name == 'workflow_dispatch' && inputs.type == 'draft' }}
       mcpelauncher-ref: ${{ needs.read-repo-files.outputs.mcpelauncher-ref || 'ng' }}
     secrets: inherit
