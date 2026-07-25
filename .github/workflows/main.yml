@@ -339,33 +339,19 @@ jobs:
     runs-on: macos-15-intel
     env:
       MACOSX_DEPLOYMENT_TARGET: "10.13"
-      # Bump this suffix to force a cache rebuild when angle source changes
-      cache-name: cache-angle-gles31-x64-v1
     steps:
-    - name: Check angle cache
+    # Single cache step: restores on hit, saves on miss after build.
+    # Bump the key suffix to force a rebuild when ANGLE source changes.
+    - name: Cache ANGLE (GLES 3.1 x86_64 Metal)
       id: angle
       uses: actions/cache@v4
       with:
         path: source/osx-angle-ci/artifacts
-        key: ${{ runner.os }}-${{ env.cache-name }}
-        lookup-only: true
-
-    - uses: actions/setup-python@v5
-      if: steps.angle.outputs.cache-hit != 'true'
-      with:
-        python-version: '3.x'
-        architecture: 'x64'
-
-    - name: Restore angle cache (for build job)
-      if: steps.angle.outputs.cache-hit == 'true'
-      uses: actions/cache@v4
-      with:
-        path: source/osx-angle-ci/artifacts
-        key: ${{ runner.os }}-${{ env.cache-name }}
+        key: ${{ runner.os }}-angle-gles31-x64-v1
 
     # Build ANGLE from minecraft-linux/angle metal-freeze branch for x86_64.
-    # Same source the M1 build uses; only target_cpu differs.
-    # Produces libEGL.dylib + libGLESv2.dylib backed by Metal — reports GLES 3.1.
+    # Same source as the M1 workflow; only target_cpu differs (x64 vs arm64).
+    # Metal backend -> advertises OpenGL ES 3.1, satisfying Minecraft 1.21.60+.
     - name: Install depot_tools
       if: steps.angle.outputs.cache-hit != 'true'
       run: |
@@ -377,44 +363,35 @@ jobs:
       run: |
         git clone https://github.com/minecraft-linux/angle.git -b metal-freeze angle-src
         cd angle-src
-        python scripts/bootstrap.py
+        python3 scripts/bootstrap.py
         gclient sync --no-history -j8
 
-    - name: Build ANGLE x86_64 (Metal backend, GLES 3.1)
+    - name: Build ANGLE x86_64
       if: steps.angle.outputs.cache-hit != 'true'
       run: |
         mkdir -p source/osx-angle-ci/artifacts
-        OUT="$PWD/source/osx-angle-ci/artifacts"
+        OUT="$(pwd)/source/osx-angle-ci/artifacts"
         cd angle-src
-        cat > "$OUT/args.gn" <<'EOF'
-        target_cpu="x64"
-        is_debug=false
-        mac_sdk_min="10.13"
-        mac_min_system_version="10.13"
-        mac_deployment_target="10.13"
-        angle_enable_metal=true
-        angle_enable_swiftshader=false
-        angle_enable_vulkan=false
-        angle_enable_gl=false
-        angle_enable_null=false
-        EOF
+        cat > "$OUT/args.gn" << 'GNEOF'
+target_cpu="x64"
+is_debug=false
+mac_sdk_min="10.13"
+mac_min_system_version="10.13"
+mac_deployment_target="10.13"
+angle_enable_metal=true
+angle_enable_swiftshader=false
+angle_enable_vulkan=false
+angle_enable_gl=false
+angle_enable_null=false
+GNEOF
         gn gen "$OUT"
         autoninja -C "$OUT" libEGL libGLESv2
 
-    - name: Verify GLES version reported by built ANGLE
+    - name: Verify ANGLE dylibs
       if: steps.angle.outputs.cache-hit != 'true'
       run: |
-        echo "Built dylibs:"
         ls -lh source/osx-angle-ci/artifacts/libEGL.dylib source/osx-angle-ci/artifacts/libGLESv2.dylib
-        # Confirm GLES 3.1 symbols are present
-        nm source/osx-angle-ci/artifacts/libGLESv2.dylib | grep -c "glDispatchCompute" || true
-
-    - name: Save angle cache
-      if: steps.angle.outputs.cache-hit != 'true'
-      uses: actions/cache@v4
-      with:
-        path: source/osx-angle-ci/artifacts
-        key: ${{ runner.os }}-${{ env.cache-name }}
+        nm source/osx-angle-ci/artifacts/libGLESv2.dylib | grep -c "glDispatchCompute" && echo "GLES 3.1 confirmed" || echo "WARNING: glDispatchCompute not found"
   build-protobuf:
     runs-on: macos-15-intel
     steps:
@@ -643,14 +620,12 @@ jobs:
         cd ../ssl64
         rm -rf lib
         ln -s ../ssl/lib
-    - name: Cache angle
-      if: steps.angle.outputs.cache-hit != 'true'
+    - name: Restore angle (GLES 3.1 build)
       uses: actions/cache@v4
-      env:
-        cache-name: cache-angle-3
       with:
         path: source/osx-angle-ci/artifacts
-        key: ${{ runner.os }}-build-${{ env.cache-name }}
+        key: ${{ runner.os }}-cache-angle-gles31-x64-v1
+        fail-on-cache-miss: true
     - uses: actions/cache/restore@v4
       with:
         fail-on-cache-miss: true
