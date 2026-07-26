@@ -206,6 +206,142 @@ jobs:
           sed -i '' "s/$NEEDLE/if(true) {/" "$QML"
           grep -n "if(true) {" "$QML"
 
+      # Adds: a "save downloaded .apk to a folder" setting (default OFF, matches
+      # the existing keepApks toggle's default) with a custom-folder picker,
+      # wired into the real Play/Download flow; clarifying x86_64-only text on
+      # the Import .apk button and dialog. Importing an incompatible apk was
+      # already handled gracefully upstream (apkextractiontask.cpp throws
+      # std::runtime_error, caught and surfaced via a QML MessageDialog — no
+      # crash), so no fix was needed there.
+      - name: Patch in custom apk-save-folder setting + clearer Import UI
+        run: |
+          BASE="source/mcpelauncher-ui/mcpelauncher-ui-qt"
+          python3 - << 'PYEOF'
+          BASE = "source/mcpelauncher-ui/mcpelauncher-ui-qt"
+
+          def patch(path, replacements):
+              full = f"{BASE}/{path}"
+              with open(full) as f:
+                  content = f.read()
+              for old, new in replacements:
+                  assert old in content, f"pattern not found in {path}: {old[:60]!r}"
+                  content = content.replace(old, new)
+              with open(full, "w") as f:
+                  f.write(content)
+              print(f"patched {path}")
+
+          patch("googleapkdownloadtask.h", [
+              ("    Q_PROPERTY(bool keepApks READ keepApks WRITE setKeepApks)\n"
+               "    Q_PROPERTY(bool dryrun MEMBER m_dryrun)",
+               "    Q_PROPERTY(bool keepApks READ keepApks WRITE setKeepApks)\n"
+               "    Q_PROPERTY(QString apksDir READ apksDir WRITE setApksDir)\n"
+               "    Q_PROPERTY(bool dryrun MEMBER m_dryrun)"),
+              ("    bool m_keepApks = false;\n    bool m_dryrun = false;",
+               "    bool m_keepApks = false;\n    QString m_apksDir;\n    bool m_dryrun = false;"),
+              ("    bool keepApks() const { return m_keepApks; }\n"
+               "    void setKeepApks(bool keepApks) { m_keepApks = keepApks; }",
+               "    bool keepApks() const { return m_keepApks; }\n"
+               "    void setKeepApks(bool keepApks) { m_keepApks = keepApks; }\n\n"
+               "    QString apksDir() const { return m_apksDir; }\n"
+               "    void setApksDir(QString apksDir) { m_apksDir = apksDir; }"),
+          ])
+
+          patch("googleapkdownloadtask.cpp", [
+              ('    auto apksdir = QDir(QStandardPaths::writableLocation(QStandardPaths::GenericDataLocation)).filePath("mcpelauncher/apks");\n'
+               '    QDir().mkpath(apksdir);',
+               '    auto apksdir = m_apksDir.isEmpty()\n'
+               '        ? QDir(QStandardPaths::writableLocation(QStandardPaths::GenericDataLocation)).filePath("mcpelauncher/apks")\n'
+               '        : m_apksDir;\n'
+               '    QDir().mkpath(apksdir);'),
+          ])
+
+          patch("launchersettings.h", [
+              ("    Q_PROPERTY(bool keepApks READ keepApks WRITE setKeepApks NOTIFY settingsChanged)",
+               "    Q_PROPERTY(bool keepApks READ keepApks WRITE setKeepApks NOTIFY settingsChanged)\n"
+               "    Q_PROPERTY(QString apkSaveDir READ apkSaveDir WRITE setApkSaveDir NOTIFY settingsChanged)"),
+              ('    bool keepApks() const { return settings.value("keepApks", false).toBool(); }\n'
+               '    void setKeepApks(bool value) { settings.setValue("keepApks", value); emit settingsChanged(); }',
+               '    bool keepApks() const { return settings.value("keepApks", false).toBool(); }\n'
+               '    void setKeepApks(bool value) { settings.setValue("keepApks", value); emit settingsChanged(); }\n\n'
+               '    QString apkSaveDir() const { return settings.value("apkSaveDir", "").toString(); }\n'
+               '    void setApkSaveDir(QString value) { settings.setValue("apkSaveDir", value); emit settingsChanged(); }'),
+          ])
+
+          patch("qml/LauncherSettingsGeneral.qml", [
+              ('import QtQuick 2.9\nimport QtQuick.Layouts 1.2\nimport "ThemedControls"',
+               'import QtQuick 2.9\nimport QtQuick.Layouts 1.2\nimport QtQuick.Dialogs 1.2\nimport "ThemedControls"'),
+              ('    MCheckBox {\n'
+               '        text: qsTr("Keep Apks in <GameData>/apks")\n'
+               '        Component.onCompleted: checked = launcherSettings.keepApks\n'
+               '        onCheckedChanged: launcherSettings.keepApks = checked\n'
+               '    }',
+               '    MCheckBox {\n'
+               '        id: keepApksCheckbox\n'
+               '        text: qsTr("Save downloaded .apk to a folder (x86_64, playable via Import .apk)")\n'
+               '        Component.onCompleted: checked = launcherSettings.keepApks\n'
+               '        onCheckedChanged: launcherSettings.keepApks = checked\n'
+               '    }\n\n'
+               '    RowLayout {\n'
+               '        visible: keepApksCheckbox.checked\n'
+               '        Layout.fillWidth: true\n\n'
+               '        MTextField {\n'
+               '            id: apkSaveDirField\n'
+               '            Layout.fillWidth: true\n'
+               '            readOnly: true\n'
+               '            text: launcherSettings.apkSaveDir !== "" ? launcherSettings.apkSaveDir : qsTr("(default: <GameData>/apks)")\n'
+               '        }\n\n'
+               '        MButton {\n'
+               '            text: qsTr("Choose Folder")\n'
+               '            onClicked: apkSaveDirDialog.open()\n'
+               '        }\n\n'
+               '        MButton {\n'
+               '            text: qsTr("Reset")\n'
+               '            visible: launcherSettings.apkSaveDir !== ""\n'
+               '            onClicked: launcherSettings.apkSaveDir = ""\n'
+               '        }\n'
+               '    }\n\n'
+               '    FileDialog {\n'
+               '        id: apkSaveDirDialog\n'
+               '        title: qsTr("Choose a folder to save downloaded .apk files")\n'
+               '        selectFolder: true\n'
+               '        onAccepted: launcherSettings.apkSaveDir = fileUrl.toString().replace("file://", "")\n'
+               '    }'),
+          ])
+
+          patch("qml/LauncherMain.qml", [
+              ("        keepApks: launcherSettings.downloadOnly || launcherSettings.keepApks",
+               "        keepApks: launcherSettings.downloadOnly || launcherSettings.keepApks\n"
+               "        apksDir: launcherSettings.apkSaveDir"),
+          ])
+
+          patch("qml/LauncherSettingsVersions.qml", [
+              ('        MButton {\n'
+               '            Layout.fillWidth: true\n'
+               '            text: (googleLoginHelper.account !== null && playVerChannel.hasVerifiedLicense || launcherSettings.trialMode || !LAUNCHER_ENABLE_GOOGLE_PLAY_LICENCE_CHECK) ? launcherSettings.trialMode ?  qsTr("Import trial .apk") : qsTr("Import .apk") : "<s>" + qsTr("Import .apk") + "</s>"\n'
+               '            onClicked: apkImportWindow.pickFile()\n'
+               '            enabled: (googleLoginHelper.account !== null && playVerChannel.hasVerifiedLicense || launcherSettings.trialMode || !LAUNCHER_ENABLE_GOOGLE_PLAY_LICENCE_CHECK)\n'
+               '        }',
+               '        MButton {\n'
+               '            Layout.fillWidth: true\n'
+               '            text: (googleLoginHelper.account !== null && playVerChannel.hasVerifiedLicense || launcherSettings.trialMode || !LAUNCHER_ENABLE_GOOGLE_PLAY_LICENCE_CHECK) ? launcherSettings.trialMode ?  qsTr("Import trial .apk") : qsTr("Import .apk (x86_64 only)") : "<s>" + qsTr("Import .apk") + "</s>"\n'
+               '            onClicked: apkImportWindow.pickFile()\n'
+               '            enabled: (googleLoginHelper.account !== null && playVerChannel.hasVerifiedLicense || launcherSettings.trialMode || !LAUNCHER_ENABLE_GOOGLE_PLAY_LICENCE_CHECK)\n'
+               '        }\n\n'
+               '        MText {\n'
+               '            Layout.fillWidth: true\n'
+               '            wrapMode: Text.WordWrap\n'
+               '            font.pointSize: 8\n'
+               '            color: "#aaa"\n'
+               '            text: qsTr("Only x86_64 Minecraft apks run on this launcher. An apk extracted from a phone or most download mirrors is arm64 and will be rejected. Use \\"Sign in with Google\\" + \\"Download and play\\" to fetch a compatible copy, or enable \\"Save downloaded .apk to a folder\\" in Settings to keep a reusable x86_64 file for Import.")\n'
+               '        }'),
+          ])
+
+          patch("qml/ApkImportWindow.qml", [
+              ('title: "Minecraft .apk import"',
+               'title: "Minecraft .apk import (must be x86_64)"'),
+          ])
+          PYEOF
+
       - name: Build libzip
         run: |
           git clone https://github.com/nih-at/libzip libzip
