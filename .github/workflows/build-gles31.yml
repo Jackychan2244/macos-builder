@@ -181,6 +181,31 @@ jobs:
           git clone https://github.com/minecraft-linux/mcpelauncher-versiondb.git source/versionsdb
           git -C source/versionsdb checkout "$VDBREF"
 
+      # Remove the package-name whitelist gate on APK import. Upstream code:
+      #   var packages = ["com.mojang.minecrafttrialpe", "com.mojang.minecraftedu"]
+      #   if(!root.trialMode) { packages.push("com.mojang.minecraftpe") }
+      # With trial mode ON, this list explicitly EXCLUDES com.mojang.minecraftpe
+      # (the real retail package our APK has), producing "Trying to import a
+      # forbidden apk" regardless of trial mode state. This is a package-name
+      # steering check, not a security/compatibility check — the legitimate
+      # validity check (presence of a working libminecraftpe.so for a supported
+      # ABI) lives separately in apkextractiontask.cpp and is left untouched.
+      # An empty allowedPackages list disables the whitelist entirely (see the
+      # C++ side: `if (!m_allowedPackages.empty() && !contains(...))`).
+      - name: Patch out APK package whitelist
+        run: |
+          QML="source/mcpelauncher-ui/mcpelauncher-ui-qt/qml/ApkImportHelper.qml"
+          NEEDLE='if(!root.trialMode) {'
+          COUNT=$(grep -c -F "$NEEDLE" "$QML")
+          [ "$COUNT" -eq 1 ] || { echo "FATAL: expected 1 match for '$NEEDLE', found $COUNT — upstream QML changed"; exit 1; }
+          # com.mojang.minecraftpe (the real retail package) is only added to
+          # allowedPackages when trialMode is OFF — with trial mode on it stays
+          # excluded, so "Import .apk" rejects a genuine Minecraft apk with
+          # "Trying to import a forbidden apk" regardless of the trial toggle.
+          # Force the branch to always run so the real package is always allowed.
+          sed -i '' "s/$NEEDLE/if(true) {/" "$QML"
+          grep -n "if(true) {" "$QML"
+
       - name: Build libzip
         run: |
           git clone https://github.com/nih-at/libzip libzip
@@ -276,7 +301,7 @@ jobs:
             -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
             -DGAME_LAUNCHER_PATH=. \
             -DQt5QuickCompiler_FOUND=OFF \
-            -DLAUNCHER_ENABLE_GOOGLE_PLAY_LICENCE_CHECK=ON \
+            -DLAUNCHER_ENABLE_GOOGLE_PLAY_LICENCE_CHECK=OFF \
             -DLAUNCHER_DISABLE_DEV_MODE=ON \
             -DLAUNCHER_VERSION_NAME="v1.x-gles31-$GITHUB_RUN_NUMBER" \
             -DLAUNCHER_VERSION_CODE="$GITHUB_RUN_NUMBER" \
