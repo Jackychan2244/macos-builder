@@ -320,6 +320,17 @@ jobs:
           printf '  <key>CFBundleVersion</key><string>1.0.%s</string>\n' "$GITHUB_RUN_NUMBER" >> "$PLIST"
           printf '%s\n' '  <key>LSMinimumSystemVersion</key><string>10.15</string>' >> "$PLIST"
           printf '%s\n' '  <key>NSHighResolutionCapable</key><true/>' >> "$PLIST"
+          # QtWebEngine (Chromium) probes these permissions during the Google
+          # OAuth login flow even when unused. Without a usage description,
+          # macOS TCC kills the process outright with no catchable exception —
+          # confirmed via crash report: "app crashed because it attempted to
+          # access privacy-sensitive data without a usage description ...
+          # NSBluetoothAlwaysUsageDescription". Add the full set Chromium is
+          # known to probe so future TCC checks don't reintroduce this.
+          printf '%s\n' '  <key>NSBluetoothAlwaysUsageDescription</key><string>Not used. Required by the embedded browser engine.</string>' >> "$PLIST"
+          printf '%s\n' '  <key>NSCameraUsageDescription</key><string>Not used. Required by the embedded browser engine.</string>' >> "$PLIST"
+          printf '%s\n' '  <key>NSMicrophoneUsageDescription</key><string>Not used. Required by the embedded browser engine.</string>' >> "$PLIST"
+          printf '%s\n' '  <key>NSLocationWhenInUseUsageDescription</key><string>Not used. Required by the embedded browser engine.</string>' >> "$PLIST"
           printf '%s\n' '</dict></plist>' >> "$PLIST"
           /usr/libexec/PlistBuddy -c "Print :CFBundleExecutable" "$PLIST"
 
