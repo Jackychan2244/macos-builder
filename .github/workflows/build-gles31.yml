@@ -275,6 +275,7 @@ jobs:
             -DCMAKE_INSTALL_RPATH_USE_LINK_PATH=ON \
             -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
             -DGAME_LAUNCHER_PATH=. \
+            -DQt5QuickCompiler_FOUND=OFF \
             -DLAUNCHER_ENABLE_GOOGLE_PLAY_LICENCE_CHECK=ON \
             -DLAUNCHER_DISABLE_DEV_MODE=ON \
             -DLAUNCHER_VERSION_NAME="v1.x-gles31-$GITHUB_RUN_NUMBER" \
@@ -297,11 +298,30 @@ jobs:
           cp "$INSTALL/bin/"* "$APP/Contents/MacOS/" 2>/dev/null || true
           cp -R "$INSTALL/share/"* "$APP/Contents/Resources/" 2>/dev/null || true
 
-          # Copy ANGLE + OpenSSL into Frameworks
+          # Copy ANGLE + OpenSSL into Frameworks.
+          # Copy every ssl dylib including versioned sonames (libcrypto.3.dylib):
+          # binaries link the versioned name, so the bare name alone is not enough.
           cp angle-artifacts/libEGL.dylib "$APP/Contents/Frameworks/"
           cp angle-artifacts/libGLESv2.dylib "$APP/Contents/Frameworks/"
-          cp ssl-artifacts/lib/libssl.dylib "$APP/Contents/Frameworks/" 2>/dev/null || true
-          cp ssl-artifacts/lib/libcrypto.dylib "$APP/Contents/Frameworks/" 2>/dev/null || true
+          cp -L ssl-artifacts/lib/*.dylib "$APP/Contents/Frameworks/" 2>/dev/null || true
+
+          # Write Info.plist BEFORE macdeployqt: without CFBundleExecutable it
+          # reports "Could not find bundle binary" and skips rpath rewriting on
+          # the main executable, producing a bundle that dies silently at launch.
+          PLIST="$APP/Contents/Info.plist"
+          printf '%s\n' '<?xml version="1.0" encoding="UTF-8"?>' > "$PLIST"
+          printf '%s\n' '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">' >> "$PLIST"
+          printf '%s\n' '<plist version="1.0"><dict>' >> "$PLIST"
+          printf '%s\n' '  <key>CFBundleIdentifier</key><string>io.mrarm.mcpelauncher.ui</string>' >> "$PLIST"
+          printf '%s\n' '  <key>CFBundleExecutable</key><string>mcpelauncher-ui-qt</string>' >> "$PLIST"
+          printf '%s\n' '  <key>CFBundlePackageType</key><string>APPL</string>' >> "$PLIST"
+          printf '%s\n' '  <key>CFBundleName</key><string>Minecraft Bedrock Launcher</string>' >> "$PLIST"
+          printf '%s\n' '  <key>CFBundleIconFile</key><string>minecraft</string>' >> "$PLIST"
+          printf '  <key>CFBundleVersion</key><string>1.0.%s</string>\n' "$GITHUB_RUN_NUMBER" >> "$PLIST"
+          printf '%s\n' '  <key>LSMinimumSystemVersion</key><string>10.15</string>' >> "$PLIST"
+          printf '%s\n' '  <key>NSHighResolutionCapable</key><true/>' >> "$PLIST"
+          printf '%s\n' '</dict></plist>' >> "$PLIST"
+          /usr/libexec/PlistBuddy -c "Print :CFBundleExecutable" "$PLIST"
 
           # Locate Qt prefix (where download_qt.sh installed it)
           QTPFX="$GITHUB_WORKSPACE/$(find qt -name "Qt5Config.cmake" 2>/dev/null | head -1 | sed 's|/lib/cmake/Qt5/Qt5Config.cmake||')"
@@ -336,40 +356,51 @@ jobs:
           echo "Plugin dir contents:"
           ls "$APP/Contents/PlugIns/platforms/"
 
-          # Resolve ALL missing @rpath deps of every plugin and binary in the bundle.
-          # macdeployqt sometimes misses frameworks (e.g. QtDBus which libqcocoa needs).
-          # Walk every dylib/binary, find unresolved @rpath entries, copy from Qt install.
-          echo "=== Resolving missing @rpath dependencies ==="
-          find "$APP/Contents" -name "*.dylib" -o -name "*.so" -o -perm +111 -type f | \
-          while read bin; do
-            otool -L "$bin" 2>/dev/null | grep "@rpath/" | awk '{print $1}' | \
-            while read dep; do
-              framework=$(echo "$dep" | sed 's|@rpath/||' | cut -d/ -f1)
-              # Check if it's a Qt framework missing from bundle
-              if [[ "$framework" == Qt*.framework ]] && \
-                 [ ! -e "$APP/Contents/Frameworks/$framework" ] && \
-                 [ -d "$QTPFX/lib/$framework" ]; then
-                cp -R "$QTPFX/lib/$framework" "$APP/Contents/Frameworks/"
-                echo "  Copied missing: $framework (needed by $(basename $bin))"
+          # Copy any Qt frameworks macdeployqt missed (e.g. QtDBus, required by
+          # libqcocoa) — quote paths, the bundle name contains spaces.
+          echo "=== Copying Qt frameworks macdeployqt missed ==="
+          find "$APP/Contents" -type f \( -name '*.dylib' -o -name '*.so' \) -print0 | \
+          while IFS= read -r -d '' bin; do
+            otool -L "$bin" 2>/dev/null | tail -n +2 | awk '{print $1}' | grep '^@rpath/Qt' | \
+            while IFS= read -r dep; do
+              fw="${dep#@rpath/}"; fw="${fw%%/*}"
+              if [ ! -e "$APP/Contents/Frameworks/$fw" ] && [ -d "$QTPFX/lib/$fw" ]; then
+                cp -R "$QTPFX/lib/$fw" "$APP/Contents/Frameworks/"
+                echo "  copied $fw (needed by $(basename "$bin"))"
               fi
             done
           done
-          echo "=== Dependency resolution done ==="
-          ls "$APP/Contents/Frameworks/" | grep Qt
 
-          # Info.plist
-          cat > "$APP/Contents/Info.plist" << 'PLIST'
-          <?xml version="1.0" encoding="UTF-8"?>
-          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-          <plist version="1.0"><dict>
-            <key>CFBundleIdentifier</key><string>io.mrarm.mcpelauncher.ui</string>
-            <key>CFBundleExecutable</key><string>mcpelauncher-ui-qt</string>
-            <key>CFBundleName</key><string>Minecraft Bedrock Launcher</string>
-            <key>CFBundleVersion</key><string>1.0.${{ github.run_number }}</string>
-            <key>CFBundleIconFile</key><string>minecraft</string>
-            <key>LSMinimumSystemVersion</key><string>10.15</string>
-          </dict></plist>
-          PLIST
+      # Rewrite build-machine dylib paths to bundle-relative ones. cmake links
+      # absolute paths (e.g. .../ssl-out/lib/libcrypto.3.dylib) that macdeployqt
+      # leaves untouched, so dyld fails at launch with no crash report.
+      - name: Repair bundle dylib paths
+        run: |
+          bash fix_bundle.sh "output/Minecraft Bedrock Launcher.app" \
+            "$GITHUB_WORKSPACE/ssl-artifacts" \
+            "$(brew --prefix)/lib" \
+            "$(brew --prefix)/opt"
+
+      - name: Verify bundle is self-contained
+        run: |
+          APP="output/Minecraft Bedrock Launcher.app"
+          echo "=== Absolute non-system deps (must be empty) ==="
+          bad=0
+          while IFS= read -r -d '' bin; do
+            file -b "$bin" | grep -q Mach-O || continue
+            refs=$(otool -L "$bin" 2>/dev/null | tail -n +2 | awk '{print $1}' \
+                   | grep '^/' | grep -v '^/usr/lib' | grep -v '^/System' || true)
+            if [ -n "$refs" ]; then
+              echo "  $(basename "$bin"): $refs"
+              bad=1
+            fi
+          done < <(find "$APP/Contents" -type f \( -name '*.dylib' -o -name '*.so' -o -perm +111 \) -print0)
+          [ "$bad" -eq 0 ] && echo "  none — self-contained"
+
+          echo "=== QML resources compiled into binary (must be > 0) ==="
+          n=$(strings "$APP/Contents/MacOS/mcpelauncher-ui-qt" | grep -c "qml/main.qml" || true)
+          echo "  qml/main.qml references: $n"
+          [ "$n" -gt 0 ] || { echo "FATAL: QML resources not embedded — engine.load() will fail"; exit 1; }
 
       - name: Build DMG
         run: |
