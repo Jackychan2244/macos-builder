@@ -350,8 +350,13 @@ jobs:
               cp "$QTPFX/plugins/$plugin_dir/"*.dylib "$APP/Contents/PlugIns/$plugin_dir/" 2>/dev/null || true
           done
 
-          # qt.conf — tells Qt where plugins live relative to the executable
-          printf '[Paths]\nPlugins = PlugIns\n' > "$APP/Contents/Resources/qt.conf"
+          # qt.conf — tells Qt where plugins AND QML modules live.
+          # Without Qml2Imports, QQmlApplicationEngine cannot find QtQuick.Window/
+          # Controls/Dialogs even though the plugin .dylibs are on disk — it fails
+          # with "module ... is not installed" and engine.load() returns no root
+          # object, so main() returns -1 silently (Qt's own error output is
+          # suppressed unless launched with --verbose; see main.cpp qInstallMessageHandler).
+          printf '[Paths]\nPlugins = PlugIns\nQml2Imports = Resources/qml\n' > "$APP/Contents/Resources/qt.conf"
 
           echo "Plugin dir contents:"
           ls "$APP/Contents/PlugIns/platforms/"
@@ -397,10 +402,28 @@ jobs:
           done < <(find "$APP/Contents" -type f \( -name '*.dylib' -o -name '*.so' -o -perm +111 \) -print0)
           [ "$bad" -eq 0 ] && echo "  none — self-contained"
 
-          echo "=== QML resources compiled into binary (must be > 0) ==="
-          n=$(strings "$APP/Contents/MacOS/mcpelauncher-ui-qt" | grep -c "qml/main.qml" || true)
-          echo "  qml/main.qml references: $n"
-          [ "$n" -gt 0 ] || { echo "FATAL: QML resources not embedded — engine.load() will fail"; exit 1; }
+          # Actually launch the binary and confirm the QML root object loads.
+          # String-matching the binary for "main.qml" is not reliable — Qt
+          # stores qrc paths as UTF-16, so plain `strings` finds nothing even in
+          # a working build; this smoke test is the only real signal. macOS
+          # Actions runners have a window server available, so the real cocoa
+          # platform plugin can be used directly.
+          echo "=== Smoke test: launch and confirm it survives past QML load ==="
+          cd "$APP/Contents/MacOS"
+          ./mcpelauncher-ui-qt --verbose > /tmp/smoketest.log 2>&1 &
+          SMOKE_PID=$!
+          sleep 6
+          if kill -0 $SMOKE_PID 2>/dev/null; then
+            echo "  process alive after 6s — QML loaded OK"
+            kill $SMOKE_PID 2>/dev/null || true
+            wait $SMOKE_PID 2>/dev/null || true
+          else
+            wait $SMOKE_PID; code=$?
+            echo "  process exited with code $code"
+            echo "--- last 40 log lines ---"
+            tail -40 /tmp/smoketest.log
+            [ "$code" -eq 0 ] || { echo "FATAL: launcher exited during smoke test"; exit 1; }
+          fi
 
       - name: Build DMG
         run: |
