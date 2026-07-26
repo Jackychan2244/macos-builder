@@ -320,8 +320,8 @@ jobs:
 
           # Always manually copy the cocoa platform plugin — Qt will abort() without it
           mkdir -p "$APP/Contents/PlugIns/platforms"
-          cp "$QTPFX/plugins/platforms/libqcocoa.dylib" "$APP/Contents/PlugIns/platforms/" 2>/dev/null || \
-            cp "$QTPFX/plugins/platforms/libqcocoa.dylib" "$APP/Contents/PlugIns/platforms/" && echo "Copied libqcocoa.dylib"
+          cp "$QTPFX/plugins/platforms/libqcocoa.dylib" "$APP/Contents/PlugIns/platforms/"
+          echo "Copied libqcocoa.dylib"
 
           # Copy other essential plugins
           for plugin_dir in imageformats iconengines; do
@@ -334,7 +334,28 @@ jobs:
           printf '[Paths]\nPlugins = PlugIns\n' > "$APP/Contents/Resources/qt.conf"
 
           echo "Plugin dir contents:"
-          ls "$APP/Contents/PlugIns/platforms/" 2>/dev/null || echo "(empty)"
+          ls "$APP/Contents/PlugIns/platforms/"
+
+          # Resolve ALL missing @rpath deps of every plugin and binary in the bundle.
+          # macdeployqt sometimes misses frameworks (e.g. QtDBus which libqcocoa needs).
+          # Walk every dylib/binary, find unresolved @rpath entries, copy from Qt install.
+          echo "=== Resolving missing @rpath dependencies ==="
+          find "$APP/Contents" -name "*.dylib" -o -name "*.so" -o -perm +111 -type f | \
+          while read bin; do
+            otool -L "$bin" 2>/dev/null | grep "@rpath/" | awk '{print $1}' | \
+            while read dep; do
+              framework=$(echo "$dep" | sed 's|@rpath/||' | cut -d/ -f1)
+              # Check if it's a Qt framework missing from bundle
+              if [[ "$framework" == Qt*.framework ]] && \
+                 [ ! -e "$APP/Contents/Frameworks/$framework" ] && \
+                 [ -d "$QTPFX/lib/$framework" ]; then
+                cp -R "$QTPFX/lib/$framework" "$APP/Contents/Frameworks/"
+                echo "  Copied missing: $framework (needed by $(basename $bin))"
+              fi
+            done
+          done
+          echo "=== Dependency resolution done ==="
+          ls "$APP/Contents/Frameworks/" | grep Qt
 
           # Info.plist
           cat > "$APP/Contents/Info.plist" << 'PLIST'
