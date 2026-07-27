@@ -757,6 +757,14 @@ jobs:
           cp angle-artifacts/libGLESv2.dylib "$APP/Contents/Frameworks/"
           cp -L ssl-artifacts/lib/*.dylib "$APP/Contents/Frameworks/" 2>/dev/null || true
 
+          # Copy PairIP stub + patch script into the bundle.
+          mkdir -p "$APP/Contents/Resources/mcpelauncher/pairipstub"
+          cp source/pairipstub/libpairipcore.so \
+             "$APP/Contents/Resources/mcpelauncher/pairipstub/"
+          cp base-app/Contents/Resources/mcpelauncher/patch_pairip.sh \
+             "$APP/Contents/Resources/mcpelauncher/"
+          echo "PairIP stub + patch script bundled"
+
           # Write Info.plist BEFORE macdeployqt: without CFBundleExecutable it
           # reports "Could not find bundle binary" and skips rpath rewriting on
           # the main executable, producing a bundle that dies silently at launch.
