@@ -222,9 +222,17 @@ jobs:
       #
       # So the literal 4-byte string "null" is REQUIRED, not harmful: Google's
       # auth endpoint accepts it as a valid "this client legitimately has no
-      # DroidGuard attestation" signal. Upstream commit cf7cd80 (the commit
-      # mcpelauncher-ui.commit currently pins) DELETED that line, which is
-      # precisely what broke Google sign-in. This patch restores it.
+      # DroidGuard attestation" signal.
+      #
+      # Nothing was deleted — the pinned submodule simply PREDATES the fix:
+      #   Google-Play-API cf7cd80  = 2025-10-26  <- pinned by mcpelauncher-ui
+      #   Google-Play-API 6e4eeed7 = 2026-02-06  "Add droidguard_results=null
+      #                                           to HTTP login request body"
+      # Upstream hit this same failure and fixed it in Feb 2026, but the
+      # macos-builder pin still points at the Oct 2025 pre-fix commit, so the
+      # shipped build lacks the field. This patch applies the same one-line
+      # fix on top of the pinned source. (Alternative: bump the submodule pin,
+      # but that pulls unrelated changes; patching keeps the delta minimal.)
       #
       # Also ruled out by the same A/B testing:
       #   - request.app / service: every login uses com.google.android.gsf +
