@@ -273,15 +273,19 @@ jobs:
               f.write(content)
 
           # --- login.cpp: omit droidguard_results instead of sending "null" ---
+          # Upstream already removed this in a recent commit, so the line may
+          # or may not be present depending on the pinned commit. Either way is fine.
           path = "source/mcpelauncher-ui/google-play-api/lib/playapi/login.cpp"
           with open(path) as f:
               content = f.read()
           old = '    // http 400 body: Error=MissingDroidguard\n    ent.add_pair("droidguard_results", "null");\n'
-          assert old in content, "droidguard_results line not found — upstream source changed, update this patch"
-          content = content.replace(old, '    // droidguard_results intentionally omitted (was: literal "null" string,\n    // which reads as garbage attestation data rather than an absent field)\n')
-          with open(path, "w") as f:
-              f.write(content)
-          print("login.cpp: droidguard_results field omitted")
+          if old in content:
+              content = content.replace(old, '    // droidguard_results omitted: sending literal "null" is worse than omitting\n')
+              with open(path, "w") as f:
+                  f.write(content)
+              print("login.cpp: droidguard_results field omitted")
+          else:
+              print("login.cpp: droidguard_results already absent — no change needed")
           PYEOF
 
       # Adds: a "save downloaded .apk to a folder" setting (default OFF, matches
