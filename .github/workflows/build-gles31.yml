@@ -181,6 +181,73 @@ jobs:
           git clone https://github.com/minecraft-linux/mcpelauncher-versiondb.git source/versionsdb
           git -C source/versionsdb checkout "$VDBREF"
 
+      # Build a stub libpairipcore.so that exports the 3 required symbols
+      # (ExecuteProgram, JNI_OnLoad, JNI_OnUnload) as no-ops, with NO
+      # constructors (.init_array intentionally absent).
+      #
+      # WHY: libpairipcore is Google Play's PairIP anti-tamper library.
+      # On non-Android environments (our x86_64 ELF loader on macOS) its
+      # constructors detect the non-Android host, deliberately corrupt RIP,
+      # and trigger an infinite SIGSEGV loop at 100% CPU.
+      # Only 1 out of 214,750 relocations in libminecraftpe.so references
+      # ExecuteProgram (a single license/integrity check call site), so a
+      # stub that returns 0 is safe — PairIP is NOT virtualizing game logic.
+      # The game engine runs entirely through libminecraftpe's own code.
+      #
+      # The stub is an Android x86_64 ELF built with the NDK x86_64-linux-
+      # android toolchain.  It is placed into source/pairipstub/ and the
+      # launcher's post-build apk-import script is updated to patch any
+      # imported version directory that contains libpairipcore.so.
+      - name: Build libpairipcore.so stub (PairIP bypass)
+        run: |
+          # Download NDK r26 (stable, has x86_64-linux-android-clang)
+          NDK_URL="https://dl.google.com/android/repository/android-ndk-r26d-darwin.zip"
+          NDK_DIR="$GITHUB_WORKSPACE/ndk"
+          if [ ! -d "$NDK_DIR" ]; then
+            curl -sL "$NDK_URL" -o /tmp/ndk.zip
+            unzip -q /tmp/ndk.zip -d "$GITHUB_WORKSPACE"
+            mv "$GITHUB_WORKSPACE"/android-ndk-r26d "$NDK_DIR"
+            rm /tmp/ndk.zip
+          fi
+          CC="$NDK_DIR/toolchains/llvm/prebuilt/darwin-x86_64/bin/x86_64-linux-android26-clang"
+          echo "Compiler: $CC"
+          $CC --version | head -1
+
+          mkdir -p source/pairipstub
+          cat > source/pairipstub/stub.c << 'CEOF'
+          /* PairIP stub — exports 3 symbols as no-ops, no constructors.
+             ExecuteProgram: PairIP bytecode VM entry. Returning 0 means
+             "program executed, result = 0 (success)".
+             JNI_OnLoad / JNI_OnUnload: standard Android JNI lifecycle. */
+          #define JNI_VERSION_1_6 0x00010006
+          typedef void* JavaVM;
+          int JNI_OnLoad(JavaVM* vm, void* reserved) { return JNI_VERSION_1_6; }
+          void JNI_OnUnload(JavaVM* vm, void* reserved) {}
+          long ExecuteProgram(const void* program, long arg1, long arg2,
+                              long arg3, long arg4, long arg5, long arg6) { return 0; }
+          CEOF
+          # Strip leading spaces inserted by the YAML block scalar
+          sed -i '' 's/^          //' source/pairipstub/stub.c
+
+          $CC \
+            -shared \
+            -fPIC \
+            -O2 \
+            -nostartfiles \
+            -Wl,--no-undefined \
+            -Wl,-soname,libpairipcore.so \
+            -o source/pairipstub/libpairipcore.so \
+            source/pairipstub/stub.c
+
+          echo "=== stub built ==="
+          ls -lh source/pairipstub/libpairipcore.so
+          file source/pairipstub/libpairipcore.so
+          # Confirm exports and absence of init_array
+          "$NDK_DIR/toolchains/llvm/prebuilt/darwin-x86_64/x86_64-linux-android/bin/nm" \
+            -gD source/pairipstub/libpairipcore.so 2>/dev/null | grep -E "ExecuteProgram|JNI_On"
+          "$NDK_DIR/toolchains/llvm/prebuilt/darwin-x86_64/x86_64-linux-android/bin/readelf" \
+            -d source/pairipstub/libpairipcore.so 2>/dev/null | grep -E "INIT|FINI" | head -5 || echo "(no INIT_ARRAY — correct)"
+
       # Remove the package-name whitelist gate on APK import. Upstream code:
       #   var packages = ["com.mojang.minecrafttrialpe", "com.mojang.minecraftedu"]
       #   if(!root.trialMode) { packages.push("com.mojang.minecraftpe") }
@@ -538,6 +605,54 @@ jobs:
           cp angle-artifacts/libGLESv2.dylib base-app/Contents/Frameworks/
           cp ssl-artifacts/lib/libssl.dylib base-app/Contents/Frameworks/ 2>/dev/null || true
           cp ssl-artifacts/lib/libcrypto.dylib base-app/Contents/Frameworks/ 2>/dev/null || true
+
+          # Bundle the PairIP stub so the launcher can use it at runtime.
+          # Placed in Resources/mcpelauncher/pairipstub/ so the patch script
+          # can find it regardless of where the .app is installed.
+          mkdir -p base-app/Contents/Resources/mcpelauncher/pairipstub
+          cp source/pairipstub/libpairipcore.so \
+             base-app/Contents/Resources/mcpelauncher/pairipstub/
+
+          # Write the patch script that users (or the launcher) run once
+          # after importing any Minecraft version >= 1.26 to replace
+          # libpairipcore.so with the no-op stub.
+          MCDATA="$HOME/Library/Application Support/mcpelauncher"
+          cat > base-app/Contents/Resources/mcpelauncher/patch_pairip.sh << 'SHEOF'
+          #!/usr/bin/env bash
+          # patch_pairip.sh  —  replace libpairipcore.so with a no-op stub
+          # in every imported Minecraft version directory that contains it.
+          #
+          # Run once after importing a version that shows "Unsupported Version"
+          # or hangs at 100% CPU.  Safe to re-run: backs up the original first.
+          set -euo pipefail
+          APP_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+          STUB="$APP_DIR/pairipstub/libpairipcore.so"
+          MCDATA="$HOME/Library/Application Support/mcpelauncher/versions"
+
+          if [ ! -f "$STUB" ]; then
+            echo "ERROR: stub not found at $STUB"; exit 1
+          fi
+
+          PATCHED=0
+          for dir in "$MCDATA"/*/lib/x86_64; do
+            ORIG="$dir/libpairipcore.so"
+            [ -f "$ORIG" ] || continue
+            [ -f "${ORIG}.orig" ] && { echo "  already patched: $dir"; continue; }
+            cp "$ORIG" "${ORIG}.orig"
+            cp "$STUB" "$ORIG"
+            PATCHED=$((PATCHED+1))
+            echo "  patched: $dir"
+          done
+
+          if [ "$PATCHED" -eq 0 ]; then
+            echo "Nothing to patch (no unpatched libpairipcore.so found)."
+          else
+            echo "Done — patched $PATCHED version(s). Restart the launcher."
+          fi
+          SHEOF
+          # Strip YAML block indent
+          sed -i '' 's/^          //' base-app/Contents/Resources/mcpelauncher/patch_pairip.sh
+          chmod +x base-app/Contents/Resources/mcpelauncher/patch_pairip.sh
 
       - name: Find Qt path
         id: qt
