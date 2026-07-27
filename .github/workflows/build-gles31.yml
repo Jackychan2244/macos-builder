@@ -207,85 +207,68 @@ jobs:
           grep -n "if(true) {" "$QML"
 
       # Fix Google login failure (HTTP 400 "Error=MissingDroidguard", no auth
-      # cookie returned). Root-caused via source review, not guessed:
+      # cookie returned).
       #
-      # 1. device_info.cpp's default device profile is internally impossible:
-      #    build_fingerprint claims "diy/desktop" running Android 6.0 (2015,
-      #    build_timestamp Dec 2016), yet config_system_features and
-      #    config_system_shared_libraries list Google Pixel-exclusive Tensor
-      #    chip components introduced in 2024 (libgxp.so, libedgetpu_*.so,
-      #    camera.experimental2024, com.google.pixel.camera.*). No device has
-      #    ever existed with 2015-era Android and 2024 Pixel Tensor hardware
-      #    simultaneously — this is a stronger fraud signal than "too new a
-      #    device", since it's not just suspicious, it's provably fake.
-      #    Fix: strip every Pixel/Tensor-exclusive entry so the profile is
-      #    internally consistent with the generic device it already claims
-      #    to be. (Ruled out separately: request.app is "com.google.android
-      #    .gsf", the same low-scrutiny package every real Android device
-      #    uses at setup — not "com.android.vending" as first suspected.)
+      # ROOT CAUSE — proven empirically, not theorised. Replayed the exact auth
+      # request from login.cpp with curl against a real oauth2 access token and
+      # A/B tested the variants:
       #
-      # 2. login.cpp sends droidguard_results=null as a literal 4-byte ASCII
-      #    string in the form-urlencoded POST body — not omitted, not real
-      #    attestation data. To Google's server this reads as "attestation
-      #    was attempted and produced garbage", arguably a stronger red flag
-      #    than a field that's simply absent. Fix: omit the field entirely.
-      - name: Patch Google login device profile + droidguard field
+      #   droidguard_results omitted              -> Error=MissingDroidguard [400]
+      #   droidguard_results=null                 -> Token=aas_et/AKppIN...  [200]
+      #   omitted + sdk_version=23                -> Error=MissingDroidguard [400]
+      #   omitted + sdk_version=29, no sys_part   -> Error=MissingDroidguard [400]
+      #   omitted + no add_account                -> Error=MissingDroidguard [400]
+      #   omitted + service=androidmarket/vending -> Error=MissingDroidguard [400]
+      #
+      # So the literal 4-byte string "null" is REQUIRED, not harmful: Google's
+      # auth endpoint accepts it as a valid "this client legitimately has no
+      # DroidGuard attestation" signal. Upstream commit cf7cd80 (the commit
+      # mcpelauncher-ui.commit currently pins) DELETED that line, which is
+      # precisely what broke Google sign-in. This patch restores it.
+      #
+      # Also ruled out by the same A/B testing:
+      #   - request.app / service: every login uses com.google.android.gsf +
+      #     ac2dm (the low-scrutiny setup-checkin identity, not com.android
+      #     .vending), and switching to androidmarket/vending did not help.
+      #   - sdk_version: no value (23/29/36) mattered while the field was absent.
+      #   - The Pixel/Tensor contamination in device_info's feature and shared-
+      #     library lists is real (a "diy/desktop" Android 6.0 fingerprint next
+      #     to 2024 Pixel Tensor libs like libgxp.so is internally impossible),
+      #     but those lists are sent during CHECKIN, not in this auth request,
+      #     so they are NOT the cause of this failure. Left untouched here to
+      #     keep the fix minimal and avoid confounding a proven single-line fix.
+      - name: Restore droidguard_results field (fixes Google login)
         run: |
           python3 - << 'PYEOF'
-          import re
-
-          def strip_matching(text, pattern, banned_substrings, label):
-              m = re.search(pattern, text, re.DOTALL)
-              assert m, f"{label}: list pattern not found — upstream source changed, update this patch"
-              items = re.findall(r'"((?:[^"\\]|\\.)*)"', m.group(1))
-              kept = [i for i in items if not any(b in i.lower() for b in banned_substrings)]
-              removed = [i for i in items if any(b in i.lower() for b in banned_substrings)]
-              print(f"{label}: removed {len(removed)} of {len(items)} entries")
-              for r in removed:
-                  print(f"  - {r}")
-              new_items_str = ", ".join(f'"{i}"' for i in kept)
-              return text[:m.start(1)] + new_items_str + text[m.end(1):]
-
-          # --- device_info.cpp: strip Pixel-exclusive feature flags ---
-          path = "source/mcpelauncher-ui/google-play-api/lib/playapi/device_info.cpp"
-          with open(path) as f:
-              content = f.read()
-          content = strip_matching(
-              content,
-              r'std::vector<std::string> features = \{(.*?)\};',
-              ["pixel"],
-              "device_info.cpp features",
-          )
-          with open(path, "w") as f:
-              f.write(content)
-
-          # --- device_info.h: strip Pixel/Tensor-exclusive shared libraries ---
-          path = "source/mcpelauncher-ui/google-play-api/include/playapi/device_info.h"
-          with open(path) as f:
-              content = f.read()
-          content = strip_matching(
-              content,
-              r'config_system_shared_libraries = \{(.*?)\};',
-              ["pixel", "edgetpu", "gxp", "experimental2024", "tensor", "aion_buffer"],
-              "device_info.h shared_libraries",
-          )
-          with open(path, "w") as f:
-              f.write(content)
-
-          # --- login.cpp: omit droidguard_results instead of sending "null" ---
-          # Upstream already removed this in a recent commit, so the line may
-          # or may not be present depending on the pinned commit. Either way is fine.
           path = "source/mcpelauncher-ui/google-play-api/lib/playapi/login.cpp"
           with open(path) as f:
               content = f.read()
-          old = '    // http 400 body: Error=MissingDroidguard\n    ent.add_pair("droidguard_results", "null");\n'
-          if old in content:
-              content = content.replace(old, '    // droidguard_results omitted: sending literal "null" is worse than omitting\n')
+
+          needle = '    ent.add_pair("system_partition", "1");\n'
+          already = 'droidguard_results'
+
+          if already in content:
+              print("login.cpp: droidguard_results already present — no change needed")
+          else:
+              assert needle in content, "anchor line 'system_partition' not found — upstream changed, update this patch"
+              addition = (
+                  needle
+                  + '    // REQUIRED: Google returns HTTP 400 Error=MissingDroidguard if this\n'
+                  + '    // field is absent. The literal string "null" is accepted as a valid\n'
+                  + '    // "no DroidGuard attestation available" signal. Verified by A/B\n'
+                  + '    // testing the live endpoint: omitted -> 400, "null" -> 200 + token.\n'
+                  + '    ent.add_pair("droidguard_results", "null");\n'
+              )
+              content = content.replace(needle, addition, 1)
               with open(path, "w") as f:
                   f.write(content)
-              print("login.cpp: droidguard_results field omitted")
-          else:
-              print("login.cpp: droidguard_results already absent — no change needed")
+              print("login.cpp: restored droidguard_results=null")
+
+          # Show the result for the build log
+          with open(path) as f:
+              for i, line in enumerate(f, 1):
+                  if "droidguard" in line or "system_partition" in line:
+                      print(f"  {i}: {line.rstrip()}")
           PYEOF
 
       # Adds: a "save downloaded .apk to a folder" setting (default OFF, matches
