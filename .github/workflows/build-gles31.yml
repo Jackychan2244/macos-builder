@@ -279,6 +279,109 @@ jobs:
                       print(f"  {i}: {line.rstrip()}")
           PYEOF
 
+      # Add the libc symbols Minecraft 1.26+ imports but libc-shim lacks.
+      #
+      # Diagnosed by running mcpelauncher-client directly against an imported
+      # 1.26.33.1 install. It got all the way to loading the game, then:
+      #   Failed to load Minecraft: dlopen failed: cannot locate symbol
+      #   "pthread_sigmask" referenced by ".../lib/x86_64/libminecraftpe.so"
+      # which makes GameLauncher exit with code 51 and the UI show the
+      # "Unsupported Minecraft Version" (corruptedInstall) dialog. So the
+      # dialog is misleading: nothing is corrupt and the version IS in the
+      # versiondb — the ELF loader just can't resolve a libc symbol.
+      #
+      # Rather than discover these one CI build at a time, enumerated ALL of
+      # libminecraftpe.so's undefined symbols with pyelftools (1012 total,
+      # 593 non-C++-mangled) and diffed against every symbol the launcher
+      # registers. 123 looked missing, but all except three are provided by
+      # sibling .so files shipped inside the APK or by the ELF linker itself
+      # (verified per-symbol): HC*/XAsync*/XTaskQueue* -> libHttpClient
+      # .Android.so, PF* -> libPlayFabMultiplayer.so, ExecuteProgram ->
+      # libpairipcore.so, evt_api_call_default -> libmaesdk.so,
+      # __gxx_personality_v0 -> libconscrypt_jni.so, and dlopen/dlsym/dlclose/
+      # dlerror/dl_iterate_phdr -> mcpelauncher-linker's inline wrappers
+      # (public_include/mcpelauncher/linker.h).
+      #
+      # That leaves exactly three real gaps, added here:
+      #   pthread_sigmask - no-op, matching how this shim already handles the
+      #                     entire signal-mask family (sigprocmask/sigaction/
+      #                     sigemptyset are all stubbed to return 0) because
+      #                     bionic and macOS sigset_t layouts differ.
+      #   getentropy      - forwarded to arc4random_buf, which is always
+      #                     available on macOS and has identical semantics;
+      #                     256-byte cap matches the POSIX contract.
+      #   ldiv            - forwarded directly; ldiv_t is {long quot; long rem;}
+      #                     on both bionic x86_64 and macOS x86_64 (verified by
+      #                     static_assert on size and member offsets).
+      #
+      # Note libc-shim cannot be compiled standalone to test this (it relies on
+      # the parent project's C++ standard flags; an unpatched checkout fails
+      # with the same 64 errors), so the added code was compile- and ABI-checked
+      # in isolation with clang++ -std=c++17 before committing.
+      - name: Add missing libc symbols for Minecraft 1.26+
+        run: |
+          python3 - << 'PYEOF'
+          base = "source/mcpelauncher/libc-shim/src"
+
+          # --- pthread_sigmask ---
+          p = f"{base}/pthreads.cpp"
+          with open(p) as f:
+              c = f.read()
+          if '"pthread_sigmask"' in c:
+              print("pthreads.cpp: pthread_sigmask already present")
+          else:
+              anchor = '        {"pthread_kill", ::pthread_kill},\n'
+              assert anchor in c, "pthread_kill anchor not found — upstream changed"
+              c = c.replace(anchor, anchor +
+                  '        // Minecraft 1.26+ imports pthread_sigmask. bionic and macOS have\n'
+                  '        // incompatible sigset_t layouts, and this shim already no-ops the\n'
+                  '        // whole signal-mask family (see sigprocmask/sigaction in common.cpp),\n'
+                  '        // so report success without touching the mask.\n'
+                  '        {"pthread_sigmask", +[](int how, const void *set, void *oset) -> int {\n'
+                  '            return 0;\n'
+                  '        }},\n', 1)
+              with open(p, "w") as f:
+                  f.write(c)
+              print("pthreads.cpp: added pthread_sigmask")
+
+          # --- getentropy + ldiv ---
+          p = f"{base}/common.cpp"
+          with open(p) as f:
+              c = f.read()
+          anchor = '        {"getrandom", getrandom},\n'
+          assert anchor in c, "getrandom anchor not found — upstream changed"
+          add = anchor
+          if '"getentropy"' not in c:
+              add += ('        // Minecraft 1.26+ imports getentropy: arc4random_buf is always\n'
+                      '        // available on macOS with identical semantics; the 256-byte cap\n'
+                      '        // matches the POSIX contract.\n'
+                      '        {"getentropy", +[](void *buf, size_t len) -> int {\n'
+                      '            if (len > 256) {\n'
+                      '                errno = EIO;\n'
+                      '                return -1;\n'
+                      '            }\n'
+                      '            ::arc4random_buf(buf, len);\n'
+                      '            return 0;\n'
+                      '        }},\n')
+          if '"ldiv"' not in c:
+              add += ('        // Minecraft 1.26+ imports ldiv. ldiv_t is {long quot; long rem;}\n'
+                      '        // on both bionic x86_64 and macOS x86_64, so forwarding is ABI-safe.\n'
+                      '        {"ldiv", ::ldiv},\n')
+          if add != anchor:
+              c = c.replace(anchor, add, 1)
+              with open(p, "w") as f:
+                  f.write(c)
+              print("common.cpp: added getentropy/ldiv as needed")
+          else:
+              print("common.cpp: getentropy and ldiv already present")
+
+          for f_ in [f"{base}/pthreads.cpp", f"{base}/common.cpp"]:
+              with open(f_) as fh:
+                  for i, line in enumerate(fh, 1):
+                      if any(s in line for s in ('"pthread_sigmask"', '"getentropy"', '"ldiv"')):
+                          print(f"  {f_.split('/')[-1]}:{i}: {line.strip()}")
+          PYEOF
+
       # Adds: a "save downloaded .apk to a folder" setting (default OFF, matches
       # the existing keepApks toggle's default) with a custom-folder picker,
       # wired into the real Play/Download flow; clarifying x86_64-only text on
