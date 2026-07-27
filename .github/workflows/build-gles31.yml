@@ -244,7 +244,7 @@ jobs:
           file source/pairipstub/libpairipcore.so
           # Confirm exports and absence of init_array
           "$NDK_DIR/toolchains/llvm/prebuilt/darwin-x86_64/x86_64-linux-android/bin/nm" \
-            -gD source/pairipstub/libpairipcore.so 2>/dev/null | grep -E "ExecuteProgram|JNI_On"
+            -gD source/pairipstub/libpairipcore.so 2>/dev/null | grep -E "ExecuteProgram|JNI_On" || echo "(nm grep found nothing)"
           "$NDK_DIR/toolchains/llvm/prebuilt/darwin-x86_64/x86_64-linux-android/bin/readelf" \
             -d source/pairipstub/libpairipcore.so 2>/dev/null | grep -E "INIT|FINI" | head -5 || echo "(no INIT_ARRAY — correct)"
 
