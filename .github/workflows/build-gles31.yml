@@ -170,10 +170,11 @@ jobs:
           # Runner images now ship a Homebrew-managed Python (PEP 668); this is
           # a throwaway CI VM, so --break-system-packages is safe here.
           pip3 install --quiet --break-system-packages aqtinstall
-          # qttools is a separate module since Qt 6.3 and provides macdeployqt,
-          # which we need to bundle this Qt6 in isolation from the app's Qt5.
+          # macdeployqt ships in the base essentials install for 6.5.3 (no
+          # separate qttools addon module exists for this version — confirmed
+          # via `aqt list-qt mac desktop --modules 6.5.3 clang_64`).
           python3 -m aqt install-qt mac desktop 6.5.3 clang_64 \
-            -m qtwebengine qtpositioning qtwebchannel qttools qtshadertools \
+            -m qtwebengine qtpositioning qtwebchannel qtshadertools \
             -O "$GITHUB_WORKSPACE/qt6"
           find "$GITHUB_WORKSPACE/qt6" -name "Qt6Config.cmake"
 
