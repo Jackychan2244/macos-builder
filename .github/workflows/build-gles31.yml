@@ -158,6 +158,23 @@ jobs:
           QT_PACKAGE_SUFFIX: "clang_64"
           QT_PREBUILT_SUFFIX: "-MacOS-MacOS_10_13-Clang-MacOS-MacOS_10_13-X86_64"
 
+      # mcpelauncher-webview (the Xbox Live login window; without it "Sign In"
+      # fails instantly with "mcpelauncher-webview not found", surfaced to the
+      # user as "Error Code: Drowned") hardcodes `find_package(Qt6 ... REQUIRED)`
+      # — it will not build against our Qt 5.15. This was why a previous build
+      # disabled it entirely (-DBUILD_WEBVIEW=OFF). Provision a separate Qt6
+      # with the WebEngine module via aqtinstall instead of hand-rolling the
+      # online-installer 7z URLs like download_qt.sh does for Qt5.
+      - name: Install Qt 6 (WebEngine, for mcpelauncher-webview)
+        run: |
+          pip3 install --quiet aqtinstall
+          # qttools is a separate module since Qt 6.3 and provides macdeployqt,
+          # which we need to bundle this Qt6 in isolation from the app's Qt5.
+          python3 -m aqt install-qt mac desktop 6.5.3 clang_64 \
+            -m qtwebengine qtpositioning qtwebchannel qttools qtshadertools \
+            -O "$GITHUB_WORKSPACE/qt6"
+          find "$GITHUB_WORKSPACE/qt6" -name "Qt6Config.cmake"
+
       - name: Clone sources
         run: |
           MCPE_REF=$(cat mcpelauncher.commit)
@@ -664,25 +681,43 @@ jobs:
           echo "Detected Qt path: $QT_PATH"
           ls "$QT_PATH/lib/cmake/Qt5/" 2>/dev/null | head -3
 
+          # Qt6 prefix (mcpelauncher-webview only). Strip the known suffix
+          # rather than chaining dirname — unambiguous regardless of how deep
+          # aqtinstall nests the install.
+          QT6_CMAKE=$(find "$GITHUB_WORKSPACE/qt6" -name "Qt6Config.cmake" 2>/dev/null | head -1)
+          QT6_PATH=$(echo "$QT6_CMAKE" | sed 's|/lib/cmake/Qt6/Qt6Config.cmake||')
+          echo "path6=$QT6_PATH" >> $GITHUB_OUTPUT
+          echo "Detected Qt6 path: $QT6_PATH"
+          ls "$QT6_PATH/lib/cmake/Qt6/" 2>/dev/null | head -3
+
       - name: Build mcpelauncher (cmake direct)
         run: |
           SSL="$GITHUB_WORKSPACE/ssl-artifacts"
           INSTALL="$GITHUB_WORKSPACE/source/install"
           QT="$GITHUB_WORKSPACE/${{ steps.qt.outputs.path }}"
+          QT6="${{ steps.qt.outputs.path6 }}"
           mkdir -p "$INSTALL" source/build/mcpelauncher
 
+          # BUILD_WEBVIEW=ON (the project default) now that Qt6 is provisioned.
+          # Without this, mcpelauncher-webview never gets built, and clicking
+          # "Sign In" fails instantly with "mcpelauncher-webview not found" —
+          # the launcher has no way to show the Xbox Live login page at all.
+          # -DXAL_WEBVIEW_QT_PATH=. tells mcpelauncher-client to look for the
+          # webview binary next to itself in the app bundle (see
+          # xal_webview_qt.cpp:findWebView).
           cmake source/mcpelauncher \
             -B source/build/mcpelauncher \
             -DCMAKE_INSTALL_PREFIX="$INSTALL" \
             -DCMAKE_PREFIX_PATH="$QT" \
             -DQt5_DIR="$QT/lib/cmake/Qt5" \
+            -DQt6_DIR="$QT6/lib/cmake/Qt6" \
             -DCMAKE_INSTALL_RPATH_USE_LINK_PATH=ON \
             -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
             -DMSA_DAEMON_PATH=. \
             -DENABLE_DEV_PATHS=OFF \
             -DBUILD_FAKE_JNI_TESTS=OFF \
             -DBUILD_FAKE_JNI_EXAMPLES=OFF \
-            -DBUILD_WEBVIEW=OFF \
+            -DBUILD_WEBVIEW=ON \
             -DENABLE_QT_ERROR_UI=OFF \
             -DXAL_WEBVIEW_QT_PATH=. \
             -DJNI_USE_JNIVM=ON \
@@ -691,6 +726,8 @@ jobs:
             -DOPENSSL_CRYPTO_LIBRARY="$SSL/lib/libcrypto.dylib" \
             -DCMAKE_CXX_FLAGS="-DNDEBUG -D_LIBCPP_DISABLE_AVAILABILITY=1 -I$SSL/include -L$SSL/lib"
           cmake --build source/build/mcpelauncher --parallel --target install
+          echo "=== mcpelauncher-webview built? ==="
+          ls -la "$INSTALL/bin/" | grep -i webview || echo "NOT FOUND - webview did not build, check Qt6 detection above"
 
       - name: Build msa
         run: |
@@ -846,6 +883,70 @@ jobs:
               fi
             done
           done
+
+      # mcpelauncher-webview links Qt6, while mcpelauncher-ui-qt/msa-ui-qt link
+      # Qt5 — both would fight over the same framework names (QtCore.framework
+      # etc. are identically named across major versions) if merged into one
+      # shared Contents/Frameworks. Deploy it as a private nested "app" under
+      # Resources instead, built with Qt6's own macdeployqt so its Frameworks/
+      # PlugIns/qt.conf stay entirely self-contained, then point a thin
+      # wrapper script at it from Contents/MacOS (where xal_webview_qt.cpp's
+      # findWebView() looks, per -DXAL_WEBVIEW_QT_PATH=.).
+      - name: Bundle mcpelauncher-webview (isolated Qt6)
+        run: |
+          APP="output/Minecraft Bedrock Launcher.app"
+          QT6PFX="${{ steps.qt.outputs.path6 }}"
+          WV_SRC="$GITHUB_WORKSPACE/source/install/bin/mcpelauncher-webview"
+
+          if [ ! -f "$WV_SRC" ]; then
+            echo "mcpelauncher-webview was not built (Qt6 not found?) — Xbox Live sign-in will not work. Skipping."
+            exit 0
+          fi
+
+          NEST="$APP/Contents/Resources/mcpelauncher/webview-qt6"
+          FAKE="$RUNNER_TEMP/WebviewDeploy.app"
+          mkdir -p "$FAKE/Contents/MacOS"
+          cp "$WV_SRC" "$FAKE/Contents/MacOS/mcpelauncher-webview"
+          printf '%s\n' '<?xml version="1.0" encoding="UTF-8"?>' \
+            '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">' \
+            '<plist version="1.0"><dict>' \
+            '<key>CFBundleExecutable</key><string>mcpelauncher-webview</string>' \
+            '<key>CFBundleIdentifier</key><string>io.mrarm.mcpelauncher.webview</string>' \
+            '<key>CFBundlePackageType</key><string>APPL</string>' \
+            '</dict></plist>' > "$FAKE/Contents/Info.plist"
+
+          QMLDIR_ARGS=""
+          [ -d "source/mcpelauncher/mcpelauncher-webview" ] && \
+            QMLDIR_ARGS="-qmldir=source/mcpelauncher/mcpelauncher-webview"
+
+          "$QT6PFX/bin/macdeployqt" "$FAKE" $QMLDIR_ARGS \
+            && echo "Qt6 macdeployqt OK" \
+            || echo "Qt6 macdeployqt failed, webview may not run"
+
+          # Cocoa platform plugin isn't always pulled automatically.
+          mkdir -p "$FAKE/Contents/PlugIns/platforms"
+          [ -f "$FAKE/Contents/PlugIns/platforms/libqcocoa.dylib" ] || \
+            cp "$QT6PFX/plugins/platforms/libqcocoa.dylib" "$FAKE/Contents/PlugIns/platforms/" 2>/dev/null || true
+
+          mkdir -p "$(dirname "$NEST")"
+          cp -R "$FAKE" "$NEST.app"
+          chmod +x "$NEST.app/Contents/MacOS/mcpelauncher-webview"
+
+          cat > "$APP/Contents/MacOS/mcpelauncher-webview" << 'WVEOF'
+          #!/bin/bash
+          # Thin wrapper: the real Qt6 webview binary lives isolated under Resources so
+          # its Qt6 frameworks/qt.conf never collide with the app's Qt5 (see the
+          # "Bundle mcpelauncher-webview" build step for why).
+          DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../Resources/mcpelauncher/webview-qt6.app/Contents/MacOS" && pwd)"
+          exec "$DIR/mcpelauncher-webview" "$@"
+          WVEOF
+          # Strip the YAML block indent that had to be there for the heredoc
+          # to parse as part of this `run: |` step.
+          sed -i '' 's/^          //' "$APP/Contents/MacOS/mcpelauncher-webview"
+          chmod +x "$APP/Contents/MacOS/mcpelauncher-webview"
+
+          echo "=== webview-qt6.app contents ==="
+          find "$NEST.app/Contents" -maxdepth 2 | sed 's/^/  /'
 
       # Rewrite build-machine dylib paths to bundle-relative ones. cmake links
       # absolute paths (e.g. .../ssl-out/lib/libcrypto.3.dylib) that macdeployqt
