@@ -926,10 +926,15 @@ jobs:
             && echo "Qt6 macdeployqt OK" \
             || echo "Qt6 macdeployqt failed, webview may not run"
 
-          # Cocoa platform plugin isn't always pulled automatically.
+          # Always force-copy the cocoa plugin straight from $QT6PFX, even if
+          # macdeployqt already placed one — a prior build hit a case where
+          # the deployed copy's embedded metadata version didn't match the
+          # rest of Qt6 ("Invalid metadata version"), and Qt silently refuses
+          # to load a mismatched plugin (no crash, no window, sign-in just
+          # does nothing). $QT6PFX is the one exact Qt6 this whole job used to
+          # build and deploy everything else, so its own copy is authoritative.
           mkdir -p "$FAKE/Contents/PlugIns/platforms"
-          [ -f "$FAKE/Contents/PlugIns/platforms/libqcocoa.dylib" ] || \
-            cp "$QT6PFX/plugins/platforms/libqcocoa.dylib" "$FAKE/Contents/PlugIns/platforms/" 2>/dev/null || true
+          cp -f "$QT6PFX/plugins/platforms/libqcocoa.dylib" "$FAKE/Contents/PlugIns/platforms/libqcocoa.dylib"
 
           mkdir -p "$(dirname "$NEST")"
           cp -R "$FAKE" "$NEST.app"
@@ -999,6 +1004,32 @@ jobs:
             tail -40 /tmp/smoketest.log
             [ "$code" -eq 0 ] || { echo "FATAL: launcher exited during smoke test"; exit 1; }
           fi
+
+          # mcpelauncher-webview is a separate, isolated Qt6 app under
+          # Resources (see the "Bundle mcpelauncher-webview" step) — its Qt6
+          # is provisioned independently of the app's Qt5 and has already once
+          # produced a build where the platform plugin's embedded metadata
+          # version didn't match the rest of Qt6 ("Invalid metadata version",
+          # Qt refuses to load it and the process exits with no window and no
+          # crash — Xbox Live sign-in would silently do nothing). Fail the
+          # build here rather than ship that silently again.
+          echo "=== Smoke test: mcpelauncher-webview (isolated Qt6) ==="
+          # Unknown CLI (source is a submodule we don't have checked out
+          # locally) — treat it like the Qt5 UI smoke test above: launch,
+          # give it a moment, kill it, then check what it logged rather than
+          # assuming a synchronous --help.
+          QT_DEBUG_PLUGINS=1 "$APP/Contents/MacOS/mcpelauncher-webview" \
+            > /tmp/webview_smoketest.log 2>&1 &
+          WV_PID=$!
+          sleep 4
+          kill $WV_PID 2>/dev/null || true
+          wait $WV_PID 2>/dev/null || true
+          cat /tmp/webview_smoketest.log
+          if grep -qi "invalid metadata\|could not find the qt platform plugin\|failed to start because no qt platform plugin" /tmp/webview_smoketest.log; then
+            echo "FATAL: mcpelauncher-webview's Qt6 platform plugin is broken — Xbox Live sign-in would silently fail."
+            exit 1
+          fi
+          echo "  Qt6 platform plugin loads OK (no metadata/plugin errors logged)"
 
       - name: Build DMG
         run: |
