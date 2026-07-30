@@ -833,10 +833,23 @@ jobs:
             # the "Install Qt 5.15" step. Only pass -executable for it if the
             # binary actually exists (BUILD_WEBVIEW could be off).
             WV_EXEC_ARG=""
-            [ -f "$APP/Contents/MacOS/mcpelauncher-webview" ] && \
+            WV_QMLDIR_ARG=""
+            if [ -f "$APP/Contents/MacOS/mcpelauncher-webview" ]; then
               WV_EXEC_ARG="-executable=$APP/Contents/MacOS/mcpelauncher-webview"
+              # main.qml (`import QtQuick 2.2; import QtQuick.Controls 1.1;
+              # import QtWebEngine 1.5; import QtQuick.Layouts 1.1;
+              # import QtQuick.Controls.Styles 1.2`) is compiled into the
+              # binary via a .qrc, so macdeployqt's default QML import scan
+              # (which only walks loose .qml files under -qmldir) never sees
+              # it unless we point -qmldir at this submodule's src/ directly.
+              # Without this, the binary launches but QQmlApplicationEngine
+              # fails immediately: 'module "QtWebEngine" is not installed'.
+              [ -d "source/mcpelauncher/mcpelauncher-webview/src" ] && \
+                WV_QMLDIR_ARG="-qmldir=source/mcpelauncher/mcpelauncher-webview/src"
+            fi
             "$QTBIN" "$APP" \
               -qmldir=source/mcpelauncher-ui/mcpelauncher-ui-qt \
+              $WV_QMLDIR_ARG \
               -executable="$APP/Contents/MacOS/mcpelauncher-ui-qt" \
               -executable="$APP/Contents/MacOS/msa-ui-qt" $WV_EXEC_ARG \
               && echo "macdeployqt OK" || echo "macdeployqt failed, continuing"
@@ -947,7 +960,7 @@ jobs:
             kill $WV_PID 2>/dev/null || true
             wait $WV_PID 2>/dev/null || true
             cat /tmp/webview_smoketest.log
-            if grep -qi "invalid metadata\|could not find the qt platform plugin\|failed to start because no qt platform plugin\|no such file" /tmp/webview_smoketest.log; then
+            if grep -qi "invalid metadata\|could not find the qt platform plugin\|failed to start because no qt platform plugin\|no such file\|is not installed\|failed to load component" /tmp/webview_smoketest.log; then
               echo "FATAL: mcpelauncher-webview's Qt platform plugin is broken — Xbox Live sign-in would silently fail."
               exit 1
             fi
